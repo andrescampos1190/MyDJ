@@ -1,0 +1,943 @@
+// Web Audio DJ engine: two decks, equal-power crossfader, tempo sync, and the
+// primitives the auto-mixer builds on. Lives outside React — React just reads
+// state and calls methods. Audio stays in memory; nothing is written to disk.
+
+import { guess } from "web-audio-beat-detector";
+import { PitchShifter } from "soundtouchjs";
+import { detectKey } from "./keyDetect";
+import { bpmDistance, orderForParty, transitionQuality } from "./ordering";
+
+const API = "http://localhost:8000";
+
+// ---- One deck (a single playable track) --------------------------------------
+class Deck {
+  constructor(ctx, destination, id, engine) {
+    this.ctx = ctx;
+    this.id = id;
+    this.engine = engine;
+
+    this.gain = ctx.createGain(); // per-deck volume
+    this.fade = ctx.createGain(); // crossfader contribution
+    // 3-band EQ for bass-swap transitions: source -> low -> mid -> high -> gain.
+    this.eqLow = ctx.createBiquadFilter();
+    this.eqLow.type = "lowshelf";
+    this.eqLow.frequency.value = 250;
+    this.eqMid = ctx.createBiquadFilter();
+    this.eqMid.type = "peaking";
+    this.eqMid.frequency.value = 1500;
+    this.eqMid.Q.value = 0.8;
+    this.eqHigh = ctx.createBiquadFilter();
+    this.eqHigh.type = "highshelf";
+    this.eqHigh.frequency.value = 4000;
+    this.eqLow.connect(this.eqMid);
+    this.eqMid.connect(this.eqHigh);
+    this.eqHigh.connect(this.gain);
+
+    this.gain.connect(this.fade);
+    this.fade.connect(destination); // -> master
+
+    this.buffer = null;
+    this.meta = null; // { title, duration, thumbnail, uploader, bpm, offset }
+    this.baseBpm = null; // detected BPM at playbackRate 1
+    this.source = null;
+    this.shifter = null; // SoundTouch PitchShifter when key-lock is on
+    this._stPos = 0; // last reported track time (key-lock position)
+    this._stPosCtx = 0; // ctx time of that report
+    this.isPlaying = false;
+    this.playbackRate = 1;
+    this.volume = 1;
+    this.cue = 0; // cue point (buffer seconds)
+
+    this._startCtxTime = 0; // ctx time when current source started
+    this._startOffset = 0; // buffer position (s) at that start
+    this.onEnded = null;
+  }
+
+  load(buffer, meta) {
+    this.stop();
+    this.buffer = buffer;
+    this.meta = meta;
+    this.baseBpm = meta?.bpm ?? null;
+    this.playbackRate = 1;
+    this._startOffset = 0;
+    this.isPlaying = false;
+    this.cue = 0;
+    this.resetEq();
+  }
+
+  // Current playback position in buffer-seconds.
+  position() {
+    if (!this.buffer) return 0;
+    if (this.shifter) {
+      if (!this.isPlaying) return this._stPos;
+      const t = this._stPos + (this.ctx.currentTime - this._stPosCtx) * this.playbackRate;
+      return Math.min(Math.max(0, t), this.buffer.duration);
+    }
+    if (!this.isPlaying) return this._startOffset;
+    // Clamp elapsed to >=0: a beat-aligned start can be scheduled slightly in the
+    // future, which would otherwise make position() read before _startOffset.
+    const elapsed = Math.max(0, this.ctx.currentTime - this._startCtxTime) * this.playbackRate;
+    return Math.min(this._startOffset + elapsed, this.buffer.duration);
+  }
+
+  remaining() {
+    if (!this.buffer) return 0;
+    return (this.buffer.duration - this.position()) / this.playbackRate; // real seconds
+  }
+
+  _makeSource() {
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.buffer;
+    src.playbackRate.value = this.playbackRate;
+    src.connect(this.eqLow);
+    src.onended = () => {
+      if (src === this.source && this.isPlaying) {
+        this.isPlaying = false;
+        this._startOffset = this.buffer.duration;
+        this.source = null;
+        if (this.onEnded) this.onEnded(this);
+      }
+    };
+    return src;
+  }
+
+  // Start playing. `atCtxTime` lets the auto-mixer start on a precise beat.
+  play(atCtxTime = null, fromOffset = null) {
+    if (!this.buffer || this.isPlaying) return;
+    const offset = fromOffset != null ? fromOffset : this._startOffset;
+    const when = atCtxTime != null ? atCtxTime : this.ctx.currentTime;
+    if (this.engine && this.engine.keyLock) {
+      this._playKeyLock(Math.max(0, offset), when);
+    } else {
+      const src = this._makeSource();
+      src.start(when, Math.max(0, offset));
+      this.source = src;
+      this._startCtxTime = when;
+      this._startOffset = offset;
+    }
+    this.isPlaying = true;
+  }
+
+  // Pitch-preserving playback via SoundTouch. There's no start(when), so for a
+  // future (beat-aligned) start we connect on a timer — ms-accurate, fine here.
+  _playKeyLock(offset, when) {
+    const shifter = new PitchShifter(this.ctx, this.buffer, 8192);
+    shifter.tempo = this.playbackRate;
+    shifter.pitch = 1.0;
+    if (this.buffer.duration > 0) {
+      shifter.percentagePlayed = Math.min(0.999, offset / this.buffer.duration);
+    }
+    this._stPos = offset;
+    this._stPosCtx = this.ctx.currentTime;
+    this._startOffset = offset;
+    shifter.on("play", (d) => {
+      this._stPos = d.timePlayed;
+      this._stPosCtx = this.ctx.currentTime;
+      // SoundTouch reports "playing" forever after the audio is exhausted; detect the
+      // end ourselves so a manual key-locked deck flips isPlaying and fires onEnded.
+      if (
+        this.shifter === shifter &&
+        this.isPlaying &&
+        this.buffer &&
+        d.timePlayed >= this.buffer.duration - 0.05
+      ) {
+        this.isPlaying = false;
+        this._stPos = this.buffer.duration;
+        try {
+          shifter.disconnect();
+        } catch {
+          /* noop */
+        }
+        try {
+          if (shifter._node) shifter._node.onaudioprocess = null;
+        } catch {
+          /* noop */
+        }
+        this.shifter = null;
+        if (this.onEnded) this.onEnded(this);
+      }
+    });
+    this.shifter = shifter;
+    const delay = when - this.ctx.currentTime;
+    const connect = () => {
+      if (this.shifter === shifter) shifter.connect(this.eqLow);
+    };
+    if (delay > 0.02) setTimeout(connect, delay * 1000);
+    else connect();
+  }
+
+  pause() {
+    if (!this.isPlaying) return;
+    const pos = this.position();
+    this.stop();
+    this._startOffset = pos;
+    this._stPos = pos;
+  }
+
+  stop() {
+    if (this.source) {
+      try {
+        this.source.onended = null;
+        this.source.stop();
+      } catch {
+        /* already stopped */
+      }
+      try {
+        this.source.disconnect();
+      } catch {
+        /* noop */
+      }
+      this.source = null;
+    }
+    if (this.shifter) {
+      try {
+        this.shifter.off && this.shifter.off();
+      } catch {
+        /* noop */
+      }
+      try {
+        this.shifter.disconnect();
+      } catch {
+        /* noop */
+      }
+      // Null the ScriptProcessor handler so the (deprecated) node can be GC'd —
+      // disconnect() alone leaves it alive on the audio thread.
+      try {
+        if (this.shifter._node) this.shifter._node.onaudioprocess = null;
+      } catch {
+        /* noop */
+      }
+      this.shifter = null;
+    }
+    this.isPlaying = false;
+  }
+
+  seek(offset) {
+    const wasPlaying = this.isPlaying;
+    this.stop();
+    this._startOffset = Math.max(0, Math.min(offset, this.buffer ? this.buffer.duration : 0));
+    if (wasPlaying) this.play();
+  }
+
+  setVolume(v) {
+    this.volume = v;
+    this.gain.gain.value = v; // direct write (reliable; scheduling proved flaky)
+  }
+
+  // EQ in dB: 0 = flat, -40 ≈ kill. Direct writes (scheduling proved flaky).
+  setEq(band, db) {
+    const node = band === "low" ? this.eqLow : band === "mid" ? this.eqMid : this.eqHigh;
+    node.gain.value = db;
+  }
+  resetEq() {
+    this.eqLow.gain.value = 0;
+    this.eqMid.gain.value = 0;
+    this.eqHigh.gain.value = 0;
+  }
+
+  // Change tempo while keeping the playhead continuous.
+  setPlaybackRate(rate) {
+    rate = Math.max(0.5, Math.min(2, rate));
+    if (this.isPlaying) {
+      const pos = this.position();
+      if (this.shifter) {
+        this._stPos = pos;
+        this._stPosCtx = this.ctx.currentTime;
+        this.shifter.tempo = rate;
+      } else if (this.source) {
+        this._startOffset = pos;
+        this._startCtxTime = this.ctx.currentTime;
+        this.source.playbackRate.value = rate;
+      }
+    }
+    this.playbackRate = rate;
+  }
+
+  get effectiveBpm() {
+    return this.baseBpm ? this.baseBpm * this.playbackRate : null;
+  }
+}
+
+// ---- The engine (owns both decks + crossfader + master) ----------------------
+export class Engine {
+  constructor() {
+    this.ctx = null;
+    this.master = null;
+    this.deckA = null;
+    this.deckB = null;
+    this.crossfade = 0; // 0 = full A, 1 = full B
+    this.onChange = null; // UI re-render hook
+    this.playlist = []; // analyzed, decoded tracks (the party set)
+    this.transitions = []; // per-adjacent-pair transition quality (after ordering)
+    this.keyLock = false; // pitch-preserving tempo (SoundTouch) when true
+    this._txn = 0; // transition generation; stale transition timers no-op
+    // Create the context + decks up front so the UI always has decks to read.
+    // It starts "suspended" (no user gesture yet) and resumes on first load/play.
+    this._ensure();
+    this.auto = new AutoMix(this); // hands-free auto-mixer (defined below)
+  }
+
+  _ensure() {
+    if (this.ctx) return;
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctor();
+    this.ctx = ctx;
+    this.master = ctx.createGain();
+    this.master.connect(ctx.destination);
+    this.deckA = new Deck(ctx, this.master, "A", this);
+    this.deckB = new Deck(ctx, this.master, "B", this);
+    this.applyCrossfade(this.crossfade);
+  }
+
+  async resume() {
+    this._ensure();
+    if (this.ctx.state === "suspended") await this.ctx.resume();
+  }
+
+  deck(which) {
+    return which === "A" ? this.deckA : this.deckB;
+  }
+
+  other(which) {
+    return which === "A" ? this.deckB : this.deckA;
+  }
+
+  emit() {
+    if (this.onChange) this.onChange();
+  }
+
+  // Backend /api/load (download + convert + key/energy) -> fetch audio -> decode
+  // -> client-side BPM + beat offset. Returns a full track object.
+  async _fetchAndDecode(url) {
+    this._ensure();
+    await this.resume();
+    const res = await fetch(`${API}/api/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.detail || `Load failed (${res.status})`);
+    }
+    const meta = await res.json(); // {id,title,duration,thumbnail,uploader,audioUrl,key,camelot,energy}
+
+    const audioRes = await fetch(`${API}${meta.audioUrl}`);
+    if (!audioRes.ok) throw new Error("Could not fetch audio");
+    const arr = await audioRes.arrayBuffer();
+    const buffer = await this.ctx.decodeAudioData(arr);
+
+    let bpm = null;
+    let offset = 0;
+    try {
+      const g = await guess(buffer); // { bpm, offset }
+      bpm = Math.round(g.bpm);
+      offset = g.offset;
+    } catch {
+      /* tempo not detectable — leave null */
+    }
+    // Refine the key with essentia.js (more accurate than the backend K-S fallback,
+    // especially major vs minor). Falls back to the backend key if it fails.
+    let key = meta.key;
+    let camelot = meta.camelot;
+    const k = await detectKey(buffer);
+    if (k && k.camelot) {
+      key = k.key;
+      camelot = k.camelot;
+    }
+    return { url, ...meta, buffer, bpm, offset, key, camelot };
+  }
+
+  // Manual: load a URL straight into a deck.
+  async loadUrlToDeck(which, url) {
+    const track = await this._fetchAndDecode(url);
+    this.deck(which).load(track.buffer, track);
+    this.emit();
+    return track;
+  }
+
+  // ---- Playlist ----
+  async addTrack(url) {
+    const track = await this._fetchAndDecode(url);
+    // Analysis is done; drop the decoded PCM (~80 MB) so memory stays flat over a
+    // long set. It's re-decoded on demand (the backend keeps the mp3 for the session).
+    track.buffer = null;
+    this.playlist.push(track);
+    this.emit();
+    return track;
+  }
+
+  // Decode a playlist track's audio on demand (we don't keep ~90 buffers in RAM).
+  ensureDecoded(track) {
+    if (!track) return Promise.resolve(null);
+    if (track.buffer) return Promise.resolve(track.buffer);
+    if (!track._decoding) {
+      track._decoding = (async () => {
+        const r = await fetch(`${API}${track.audioUrl}`);
+        if (!r.ok) throw new Error("audio fetch failed");
+        const buf = await this.ctx.decodeAudioData(await r.arrayBuffer());
+        track.buffer = buf;
+        return buf;
+      })().finally(() => {
+        track._decoding = null;
+      });
+    }
+    return track._decoding;
+  }
+  freeDecoded(track) {
+    if (track) track.buffer = null;
+  }
+  removeTrack(id) {
+    this.playlist = this.playlist.filter((t) => t.id !== id);
+    this._recomputeTransitions();
+    this.emit();
+  }
+  clearPlaylist() {
+    this.playlist = [];
+    this.transitions = [];
+    this.emit();
+  }
+  _recomputeTransitions() {
+    const t = [];
+    for (let i = 0; i < this.playlist.length - 1; i++)
+      t.push(transitionQuality(this.playlist[i], this.playlist[i + 1]));
+    this.transitions = t;
+  }
+  // Smart algorithmic ordering (Camelot + BPM + energy arc).
+  orderPlaylist(opts) {
+    const { ordered, transitions } = orderForParty(this.playlist, opts);
+    this.playlist = ordered;
+    this.transitions = transitions;
+    this.emit();
+    return { ordered, transitions };
+  }
+  // Apply an externally-decided order (e.g. from the LLM) by track id.
+  reorderByIds(ids) {
+    const byId = new Map(this.playlist.map((t) => [t.id, t]));
+    const ordered = ids.map((id) => byId.get(id)).filter(Boolean);
+    for (const t of this.playlist) if (!ids.includes(t.id)) ordered.push(t);
+    this.playlist = ordered;
+    this._recomputeTransitions();
+    this.emit();
+  }
+  // Apply the LLM's [{id, genre}] result: reorder + tag each track's genre.
+  applyAiOrder(ordered) {
+    const genre = {};
+    const ids = [];
+    for (const o of ordered) {
+      ids.push(o.id);
+      genre[o.id] = o.genre;
+    }
+    this.reorderByIds(ids);
+    for (const t of this.playlist) if (genre[t.id]) t.genre = genre[t.id];
+    this.emit();
+  }
+
+  // ---- Transport ----
+  play(which) {
+    this._ensure();
+    this.deck(which).play();
+    this.emit();
+  }
+  pause(which) {
+    this.deck(which).pause();
+    this.emit();
+  }
+  togglePlay(which) {
+    const d = this.deck(which);
+    d.isPlaying ? this.pause(which) : this.play(which);
+  }
+  seek(which, offset) {
+    this.deck(which).seek(offset);
+    this.emit();
+  }
+  setCue(which) {
+    const d = this.deck(which);
+    d.cue = d.position();
+    this.emit();
+  }
+  jumpCue(which) {
+    const d = this.deck(which);
+    d.seek(d.cue || 0);
+    this.emit();
+  }
+  setTempo(which, rate) {
+    this.deck(which).setPlaybackRate(rate);
+    this.emit();
+  }
+  setVolume(which, v) {
+    this.deck(which).setVolume(v);
+    this.emit();
+  }
+  setMaster(v) {
+    this._ensure();
+    this.master.gain.setTargetAtTime(v, this.ctx.currentTime, 0.01);
+  }
+  setKeyLock(on) {
+    if (this.auto && this.auto.active) return; // ignore during an auto-set (manual decks only)
+    this.keyLock = !!on; // applies to decks the next time they start
+    this.emit();
+  }
+
+  // ---- Crossfader (equal power) ----
+  // Driven by direct `.value` writes (ramps animated on a JS timer). AudioParam
+  // scheduling (setValueAtTime/setTargetAtTime) proved unreliable — a param could
+  // wedge and ignore scheduled events — whereas direct writes always apply.
+  _setFadeGains(x) {
+    this.deckA.fade.gain.value = Math.cos(x * 0.5 * Math.PI);
+    this.deckB.fade.gain.value = Math.cos((1 - x) * 0.5 * Math.PI);
+  }
+  _stopXfRamp() {
+    if (this._xfTimer) {
+      clearInterval(this._xfTimer);
+      this._xfTimer = null;
+    }
+  }
+  applyCrossfade(x) {
+    this._stopXfRamp();
+    this._setFadeGains(x);
+  }
+  setCrossfade(x) {
+    this._ensure();
+    this.crossfade = Math.max(0, Math.min(1, x));
+    this.applyCrossfade(this.crossfade);
+    this.emit();
+  }
+  // Smoothly ramp the crossfader to `target` over `seconds` (JS-timed).
+  rampCrossfade(target, seconds) {
+    this._ensure();
+    this._stopXfRamp();
+    const from = this.crossfade;
+    const start = performance.now();
+    const durMs = Math.max(1, seconds * 1000);
+    this._xfTimer = setInterval(() => {
+      const f = Math.min(1, (performance.now() - start) / durMs);
+      const x = from + (target - from) * f;
+      this._setFadeGains(x);
+      this.crossfade = x;
+      if (f >= 1) {
+        this._stopXfRamp();
+        this.crossfade = target;
+        this._setFadeGains(target);
+        this.emit();
+      }
+    }, 30);
+  }
+
+  // ---- Beat sync ----
+  // Match `which` deck's tempo (and, if a reference beat is given, phase) to the
+  // other deck. Returns the ctx time of the other deck's next beat (for aligned starts).
+  nextBeatTime(which) {
+    const d = this.deck(which);
+    if (!d.baseBpm || !d.isPlaying) return this.ctx.currentTime;
+    const beatBuf = 60 / d.baseBpm; // seconds-per-beat in buffer time
+    const sinceOffset = d.position() - (d.meta.offset || 0);
+    const beats = sinceOffset / beatBuf;
+    const toNext = (Math.ceil(beats) - beats) * beatBuf; // buffer seconds
+    const toNextReal = toNext / d.playbackRate;
+    return this.ctx.currentTime + toNextReal;
+  }
+
+  // Ctx time of the deck's next bar (4-beat) boundary — for phrase alignment.
+  nextBarTime(which) {
+    const d = this.deck(which);
+    if (!d.baseBpm || !d.isPlaying) return this.ctx.currentTime;
+    const barBuf = (60 / d.baseBpm) * 4;
+    const sinceOffset = d.position() - (d.meta.offset || 0);
+    const toNext = Math.ceil(sinceOffset / barBuf) * barBuf - sinceOffset;
+    return this.ctx.currentTime + Math.max(0, toNext) / d.playbackRate;
+  }
+
+  syncTempo(which) {
+    const target = this.deck(which);
+    const ref = this.other(which);
+    if (!target.baseBpm || !ref.baseBpm) return false;
+    const rate = (ref.baseBpm * ref.playbackRate) / target.baseBpm;
+    target.setPlaybackRate(rate);
+    this.emit();
+    return true;
+  }
+
+  // Start `which` deck beat-aligned to the other (used by sync-start & auto-mix).
+  startSynced(which) {
+    const target = this.deck(which);
+    const ref = this.other(which);
+    if (target.baseBpm && ref.baseBpm) {
+      const rate = (ref.baseBpm * ref.playbackRate) / target.baseBpm;
+      target.setPlaybackRate(rate);
+    }
+    const when = ref.isPlaying ? this.nextBeatTime(ref.id) : this.ctx.currentTime;
+    const fromOffset = target.meta?.offset || 0; // begin on its first downbeat
+    target.play(when, fromOffset);
+    this.emit();
+  }
+
+  // Phrase-aligned, beat-matched transition with an EQ bass-swap. The incoming
+  // deck starts on the front deck's next bar with its lows cut, the volume
+  // crossfades equal-power, and the bass is swapped at the midpoint so two
+  // basslines never clash. Returns the total seconds until the handoff completes.
+  startTransition(fromFront, back, secs) {
+    const txn = ++this._txn; // any timer tagged with an older txn is now stale
+    const front = this.deck(fromFront);
+    const inc = this.deck(back);
+
+    // Boundary-aware: too big a tempo gap to beat-match (or a genre change with a
+    // real gap) -> clean cut instead of force-stretching.
+    const gap = bpmDistance(front.baseBpm, inc.baseBpm);
+    const genreChange =
+      front.meta?.genre && inc.meta?.genre && front.meta.genre !== inc.meta.genre;
+    if (gap > 0.08 || (genreChange && gap > 0.04)) {
+      return this._cutTransition(fromFront, back, txn);
+    }
+
+    // Beat-match the incoming deck to the front deck's effective tempo.
+    if (front.baseBpm && inc.baseBpm) {
+      inc.setPlaybackRate((front.baseBpm * front.playbackRate) / inc.baseBpm);
+    }
+    const beatReal = front.baseBpm ? 60 / front.baseBpm / front.playbackRate : 0.5;
+
+    // Snap the blend to whole bars (8–32 beats).
+    let blendBeats = Math.round(secs / beatReal / 4) * 4;
+    blendBeats = Math.max(8, Math.min(32, blendBeats || 16));
+    const blendReal = blendBeats * beatReal;
+
+    // Start the incoming track on the front deck's next bar, entering with lows
+    // (and some mids) cut so the basslines don't collide (intro-under-outro).
+    const startAt =
+      front.baseBpm && front.isPlaying ? this.nextBarTime(fromFront) : this.ctx.currentTime;
+
+    // Start the incoming track at its first drop (skip a long/quiet intro), snapped
+    // to its own bar grid so it stays beat-aligned with the front deck.
+    let inOffset = inc.meta?.introEnd || 0;
+    if (inc.baseBpm) {
+      const bar = (60 / inc.baseBpm) * 4;
+      const o = inc.meta?.offset || 0;
+      inOffset = o + Math.max(0, Math.round((inOffset - o) / bar)) * bar;
+    } else {
+      inOffset = inc.meta?.offset || 0;
+    }
+    inc.setEq("low", -40);
+    inc.setEq("mid", -6);
+    inc.setEq("high", 0);
+    inc.play(startAt, inOffset);
+
+    const startDelay = Math.max(0, startAt - this.ctx.currentTime);
+    setTimeout(() => {
+      if (this._txn === txn) this._runBlend(fromFront, back, blendReal, txn);
+    }, startDelay * 1000);
+    return startDelay + blendReal;
+  }
+
+  _runBlend(fromFront, back, blendReal, txn) {
+    const front = this.deck(fromFront);
+    const inc = this.deck(back);
+    // Equal-power volume crossfade across the blend.
+    this.rampCrossfade(back === "B" ? 1 : 0, blendReal);
+    // Bass swap at the midpoint: cut outgoing lows, open incoming lows + mids.
+    setTimeout(() => {
+      if (this._txn !== txn) return; // a newer transition started — don't touch these decks
+      front.setEq("low", -40);
+      inc.setEq("low", 0);
+      inc.setEq("mid", 0);
+    }, blendReal * 0.5 * 1000);
+    // Leave the outgoing deck's EQ flat again for its next use.
+    setTimeout(() => {
+      if (this._txn === txn) front.resetEq();
+    }, blendReal * 1000 + 80);
+  }
+
+  // Clean phrase cut for big BPM/genre gaps: no force-beatmatch. The incoming
+  // plays at its own tempo, entering at its drop on the outgoing's next bar while
+  // the outgoing is filtered (bass/mids pulled) + faded out fast.
+  _cutTransition(fromFront, back, txn) {
+    const front = this.deck(fromFront);
+    const inc = this.deck(back);
+    inc.setPlaybackRate(1);
+
+    const startAt =
+      front.baseBpm && front.isPlaying ? this.nextBarTime(fromFront) : this.ctx.currentTime;
+    let inOffset = inc.meta?.introEnd || 0;
+    if (inc.baseBpm) {
+      const bar = (60 / inc.baseBpm) * 4;
+      const o = inc.meta?.offset || 0;
+      inOffset = o + Math.max(0, Math.round((inOffset - o) / bar)) * bar;
+    } else {
+      inOffset = inc.meta?.offset || 0;
+    }
+    inc.setEq("low", 0);
+    inc.setEq("mid", 0);
+    inc.setEq("high", 0);
+    inc.play(startAt, inOffset);
+
+    const cutSecs = 2.5;
+    const startDelay = Math.max(0, startAt - this.ctx.currentTime);
+    setTimeout(() => {
+      if (this._txn !== txn) return; // a newer transition started — leave these decks alone
+      front.setEq("low", -40);
+      front.setEq("mid", -18);
+      this.rampCrossfade(back === "B" ? 1 : 0, cutSecs);
+    }, startDelay * 1000);
+    return startDelay + cutSecs;
+  }
+}
+
+// ---- Hands-free auto-mixer ----------------------------------------------------
+// Walks a queue of URLs: plays the front deck, preloads the next track into the
+// idle deck, and fires a beat-synced crossfade as the front track nears its end,
+// then rotates decks and continues.
+class AutoMix {
+  constructor(engine) {
+    this.engine = engine;
+    this.idx = -1; // index of the front-deck track in the playlist
+    this.front = "A";
+    this.active = false;
+    this.transitionSecs = 16;
+    this.status = "idle"; // idle | playing | transitioning | done
+    this._watch = null;
+    this._transitioning = false;
+    this._finalize = null; // pending handoff finalizer (run by timer OR watchdog)
+    this._deadline = 0; // ctx time by which a transition must be finalized
+    this.loop = false; // when true, wrap back to the start at the end (never stop)
+  }
+
+  get tracks() {
+    return this.engine.playlist;
+  }
+
+  _set(status) {
+    if (status) this.status = status;
+    this.engine.emit();
+  }
+
+  // The next track index — wraps to 0 when looping, else idx+1.
+  _nextIdx() {
+    const n = this.tracks.length;
+    if (this.loop) return n ? (this.idx + 1) % n : 0;
+    return this.idx + 1;
+  }
+  _hasNext() {
+    const n = this.tracks.length;
+    return this.loop ? n > 1 : this.idx + 1 < n;
+  }
+
+  // Load an already-decoded playlist track into a deck.
+  _loadDeck(deckId, idx) {
+    const t = this.tracks[idx];
+    if (!t || !t.buffer) return false;
+    const deck = this.engine.deck(deckId);
+    if (deck.buffer === t.buffer) return true; // already loaded
+    if (deck.isPlaying) return false; // never yank a live deck (throttle-reorder safety)
+    deck.load(t.buffer, t);
+    return true;
+  }
+
+  // Ensure track[idx] is decoded, then load it into a deck. Frees far buffers so
+  // memory stays flat (~3 decoded tracks) over a 6-hour set.
+  async _prepareAndLoad(deckId, idx) {
+    const t = this.tracks[idx];
+    if (!t) return;
+    try {
+      await this.engine.ensureDecoded(t);
+    } catch {
+      return; // decode failed (e.g. 403) — the watch will retry / skip
+    }
+    if (this.active && t.buffer) this._loadDeck(deckId, idx);
+    this._freeFar();
+  }
+
+  _freeFar() {
+    const n = this.tracks.length;
+    const prev = this.loop ? (this.idx - 1 + n) % n : this.idx - 1;
+    const keep = new Set([prev, this.idx, this._nextIdx()]); // decode window
+    const a = this.engine.deckA.buffer;
+    const b = this.engine.deckB.buffer;
+    for (let i = 0; i < n; i++) {
+      const t = this.tracks[i];
+      if (t.buffer && !keep.has(i) && t.buffer !== a && t.buffer !== b) {
+        this.engine.freeDecoded(t);
+      }
+    }
+  }
+
+  async start() {
+    if (this.active || this.tracks.length === 0) return;
+    this.active = true;
+    this.idx = 0;
+    this.front = "A";
+    this._transitioning = false;
+    this._finalize = null;
+    this.engine.keyLock = false; // auto-mix beat-matches; key-lock is a manual-deck feature
+    await this.engine.resume();
+    try {
+      await this.engine.ensureDecoded(this.tracks[0]);
+    } catch {
+      this.active = false;
+      this._set("idle");
+      return;
+    }
+    if (!this._loadDeck("A", 0)) {
+      this.active = false;
+      this._set("idle");
+      return;
+    }
+    this.engine.setCrossfade(0);
+    this.engine.play("A");
+    this._set("playing");
+    this.engine.deckA.onEnded = (d) => this._onEnded(d);
+    this.engine.deckB.onEnded = (d) => this._onEnded(d);
+    if (this._hasNext()) this._prepareAndLoad("B", this._nextIdx()); // decode + preload next
+    this._startWatch();
+  }
+
+  _onEnded(deck) {
+    if (!this.active || this._transitioning) return;
+    if (deck !== this.engine.deck(this.front)) return; // only the front deck ending matters
+    if (!this._hasNext()) {
+      this._finish();
+      return;
+    }
+    const back = this.engine.other(this.front);
+    if (!back.buffer) {
+      this._prepareAndLoad(back.id, this._nextIdx()); // not decoded yet — _tick fires once ready
+      return;
+    }
+    this._beginTransition(back, 4); // cut straight into the next track
+  }
+
+  stop() {
+    this.active = false;
+    this._transitioning = false;
+    this._finalize = null;
+    this._clearWatch();
+    this.engine._txn++; // invalidate any pending transition timers so they no-op
+    this.engine._stopXfRamp();
+    this.engine.deckA.onEnded = null;
+    this.engine.deckB.onEnded = null;
+    // Stop means stop: silence both decks and reset their EQ/crossfader cleanly.
+    this.engine.deckA.stop();
+    this.engine.deckB.stop();
+    this.engine.deckA.resetEq();
+    this.engine.deckB.resetEq();
+    this.engine.setCrossfade(0);
+    this._set("idle");
+  }
+
+  _startWatch() {
+    this._clearWatch();
+    this._watch = setInterval(() => this._tick(), 250);
+  }
+  _clearWatch() {
+    if (this._watch) {
+      clearInterval(this._watch);
+      this._watch = null;
+    }
+  }
+
+  _tick() {
+    if (!this.active) return;
+    // Watchdog: a transition must never hang. If the finalize timer was dropped or
+    // throttled past its deadline, finalize it here (the watch is the authority).
+    if (this._transitioning) {
+      if (this._finalize && this.engine.ctx.currentTime > this._deadline) {
+        const f = this._finalize;
+        this._finalize = null;
+        f();
+      }
+      return;
+    }
+    const front = this.engine.deck(this.front);
+    if (!front.buffer) return;
+    // Self-heal: the front deck must always be playing during a set.
+    if (!front.isPlaying && front.position() < front.buffer.duration - 1) {
+      this.engine.play(this.front);
+      return;
+    }
+    const back = this.engine.other(this.front);
+    const hasNext = this._hasNext();
+    const ended = !front.isPlaying && front.position() >= front.buffer.duration - 0.05;
+
+    if (!hasNext) {
+      if (ended || front.remaining() <= 0.25) this._finish();
+      return;
+    }
+    if (!back.buffer) {
+      this._prepareAndLoad(back.id, this._nextIdx()); // decode the next track ahead of time
+      return;
+    }
+    const dur = front.buffer.duration;
+
+    // Mix OUT at the detected outro, but early enough that the blend finishes before
+    // the track ends. Avoid mixing out into a mid-song breakdown (step back to groove).
+    let mixOutAt = front.meta?.outroStart;
+    if (!(mixOutAt > 0)) mixOutAt = dur;
+    mixOutAt = Math.max(1, Math.min(mixOutAt, dur - this.transitionSecs));
+    const curve = front.meta?.energyCurve;
+    if (curve && curve.length) {
+      let ci = Math.max(0, Math.min(curve.length - 1, Math.floor((mixOutAt / dur) * curve.length)));
+      if (curve[ci] < 0.45) {
+        for (let i = ci; i >= 0; i--) {
+          if (curve[i] >= 0.55) {
+            mixOutAt = (i / curve.length) * dur;
+            break;
+          }
+        }
+      }
+    }
+
+    if (ended) this._beginTransition(back, 4);
+    else if (front.isPlaying && front.position() >= mixOutAt) this._beginTransition(back, this.transitionSecs);
+  }
+
+  _beginTransition(back, secs) {
+    if (!back || !back.buffer) return; // never transition to an empty deck
+    const total = this.engine.startTransition(this.front, back.id, secs);
+    this._afterTransition(total);
+  }
+
+  _afterTransition(secs) {
+    this._transitioning = true;
+    this._set("transitioning");
+    const fromFront = this.front;
+    const back = fromFront === "A" ? "B" : "A";
+    this._deadline = this.engine.ctx.currentTime + secs + 4;
+    // Finalize the handoff deterministically (run by the timer OR the watchdog,
+    // whichever fires first) and ALWAYS clear the guard, even if a line throws.
+    const finalize = () => {
+      if (!this.active) {
+        this._transitioning = false;
+        return; // stopped/finished mid-transition — nothing to hand off
+      }
+      try {
+        this.engine.deck(fromFront).stop();
+        this.engine.deck(fromFront).resetEq();
+        this.engine.deck(back).resetEq();
+        this.engine.setCrossfade(back === "B" ? 1 : 0);
+        this.front = back;
+        this.idx = this._nextIdx();
+        this._set("playing");
+        if (this._hasNext()) this._prepareAndLoad(fromFront, this._nextIdx()); // load following track
+      } catch {
+        /* never wedge the set */
+      } finally {
+        this._transitioning = false;
+      }
+    };
+    this._finalize = finalize;
+    setTimeout(() => {
+      if (this._finalize === finalize) {
+        this._finalize = null;
+        finalize();
+      }
+    }, secs * 1000);
+  }
+
+  _finish() {
+    this.active = false;
+    this._transitioning = false;
+    this._finalize = null;
+    this._clearWatch();
+    this.engine.deckA.onEnded = null;
+    this.engine.deckB.onEnded = null;
+    this._set("done");
+  }
+}

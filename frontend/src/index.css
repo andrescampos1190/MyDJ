@@ -1,0 +1,44 @@
+:root {
+  --bg: #0e1014;
+  --card: #181b22;
+  --card-2: #20242d;
+  --text: #e8eaf0;
+  --muted: #98a0ad;
+  --border: #2a2f3a;
+  --accent: #7c5cff;
+  --accent-hover: #8f73ff;
+  --accent-bg: rgba(124, 92, 255, 0.14);
+  --a: #22d3ee; /* deck A accent */
+  --b: #fb7185; /* deck B accent */
+  --danger-bg: #381c21;
+  --danger-border: #6b2b34;
+  --danger-text: #ffb3bd;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+}
+body {
+  min-height: 100vh;
+  background: radial-gradient(1000px 500px at 50% -120px, #1a1f2e, var(--bg));
+  color: var(--text);
+  font: 16px/1.5 system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 40px 20px 80px;
+}
+
+a {
+  color: var(--accent);
+}
