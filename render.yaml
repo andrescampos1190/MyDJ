@@ -1,0 +1,38 @@
+# Render Blueprint for MyDJ — Dashboard → New → Blueprint, point it at this repo.
+# Two services: the Docker backend (yt-dlp + ffmpeg + analysis) and the static Vite
+# frontend.
+#
+# After the FIRST deploy, fill in the two cross-referencing URLs (neither is known
+# until both services exist), then redeploy each:
+#   • mydj-backend  → ALLOWED_ORIGINS = https://<your-frontend>.onrender.com
+#   • mydj-frontend → VITE_API_URL    = https://<your-backend>.onrender.com
+#
+# Note: VITE_API_URL is baked in at BUILD time, so changing it requires a frontend redeploy.
+
+services:
+  - type: web
+    name: mydj-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    plan: free        # 512 MB — may OOM on download+ffmpeg+analysis; bump to "starter" if so
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false   # optional, enables AI Polish
+      - key: ALLOWED_ORIGINS
+        sync: false   # set to the frontend URL after first deploy
+
+  - type: web
+    name: mydj-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false   # set to the backend URL after first deploy
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

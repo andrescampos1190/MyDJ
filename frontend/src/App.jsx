@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Engine } from "./audioEngine";
+import { Engine, API } from "./audioEngine";
 import { relativeEnergies } from "./ordering";
 import Waveform from "./Waveform";
 import "./App.css";
-
-const API = "http://localhost:8000";
 
 function fmt(t) {
   if (!isFinite(t) || t < 0) t = 0;

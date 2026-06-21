@@ -118,6 +118,23 @@ algorithmic **Order for Party** works regardless. Model: `claude-opus-4-8` (chan
   freed and re-decoded from the server on demand. Steady-state memory stays flat (~3 tracks) whether
   the set is 6 tracks or 6 hours, instead of growing until the tab runs out of memory and crashes.
 
+## Deploy to Render (Docker)
+The repo ships a [`Dockerfile`](Dockerfile) (Python + ffmpeg) and a [`render.yaml`](render.yaml)
+blueprint for the backend + static frontend.
+1. **New → Blueprint** in Render, point it at this repo — it creates `mydj-backend` (Docker) and
+   `mydj-frontend` (static Vite build).
+2. After the first deploy, set the two cross-referencing URLs and redeploy each:
+   - backend `ALLOWED_ORIGINS` = `https://<your-frontend>.onrender.com`
+   - frontend `VITE_API_URL` = `https://<your-backend>.onrender.com` (baked in at build time)
+   - backend `ANTHROPIC_API_KEY` (optional, enables AI Polish)
+3. Backend health-check path is `/api/health`. The free tier (512 MB) may OOM on
+   download+ffmpeg+analysis — move to a paid instance if it does.
+
+> ⚠️ **Two realities of cloud-hosting a yt-dlp app:** (1) YouTube frequently **blocks datacenter
+> IPs** (Render/AWS/…) with a bot check, so downloads that work from home often fail in the cloud;
+> (2) it's an **open, no-auth downloader** — anyone with the URL can drive your server. Built for
+> personal use; deploy at your own risk.
+
 ## Stretch ideas
 Stem-based transitions · ML-based energy/danceability · drag-to-reorder · save/record the mix ·
 hot cues (multiple cue points) · Rubberband/Superpowered for higher-quality key-lock.

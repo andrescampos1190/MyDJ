@@ -1,0 +1,14 @@
+# Keep the Docker build context lean and secrets out of the image.
+**/__pycache__/
+**/*.pyc
+backend/venv/
+backend/downloads/
+backend/.env
+.env
+frontend/
+node_modules/
+.git/
+.gitignore
+.claude/
+dist/
+*.ps1

@@ -7,7 +7,9 @@ import { PitchShifter } from "soundtouchjs";
 import { detectKey } from "./keyDetect";
 import { bpmDistance, orderForParty, transitionQuality } from "./ordering";
 
-const API = "http://localhost:8000";
+// Backend base URL. Build-time configurable via VITE_API_URL (set it in production,
+// e.g. https://your-backend.onrender.com); falls back to the local dev backend.
+export const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const AUDIO_CACHE = "mydj-audio-v1"; // compressed audio kept client-side: playback survives a backend restart
 const SESSION_KEY = "mydj-session-v1"; // playlist + position: a tab/browser crash is recoverable
 

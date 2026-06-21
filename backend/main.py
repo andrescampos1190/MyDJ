@@ -75,9 +75,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MyDJ", lifespan=lifespan)
 
+# Frontend origins allowed to call the API. Defaults to local dev; in production set
+# ALLOWED_ORIGINS (comma-separated), e.g. "https://your-frontend.onrender.com".
+_DEFAULT_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
