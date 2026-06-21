@@ -14,6 +14,17 @@ import yt_dlp
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 
+# Resilience for flaky networks: a bounded socket timeout (so a bad connection fails
+# fast instead of hanging a worker thread) + internal retries (so a transient DNS/HTTP
+# blip self-heals instead of failing the add). Addresses intermittent 'getaddrinfo failed'
+# seen after many rapid downloads.
+_NET_OPTS = {
+    "socket_timeout": 30,
+    "retries": 5,
+    "fragment_retries": 5,
+    "extractor_retries": 3,
+}
+
 
 def _ensure_download_dir() -> None:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -42,6 +53,7 @@ def get_info(url: str) -> dict:
     Keys: title, duration (seconds | None), thumbnail, uploader.
     """
     opts = {
+        **_NET_OPTS,
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
@@ -73,6 +85,7 @@ def download(url: str, mode: str) -> dict:
     outtmpl = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
 
     opts = {
+        **_NET_OPTS,
         "outtmpl": outtmpl,
         "noplaylist": True,
         "quiet": True,

@@ -77,6 +77,21 @@ algorithmic **Order for Party** works regardless. Model: `claude-opus-4-8` (chan
   master. Transitions snap to the front deck's next bar, beat-match the incoming deck
   (`playbackRate`), crossfade equal-power, swap the bass at the midpoint, and snap the handoff clean.
 
+## Built to run unattended (6-hour set)
+- **Flat memory** — only the current + next track are decoded (~3 buffers); played tracks are freed,
+  so a 90-track night uses the same memory as a 6-track one.
+- **Backend-independent playback** — each track's *compressed* audio is cached in the browser (Cache
+  API) on load, so once a set is going it never needs the backend again; a backend restart can't stop
+  the music.
+- **Crash recovery** — the playlist + position are persisted (localStorage); reopen the tab after a
+  crash and a **⟳ Resume from track N** prompt picks the set back up (audio replays from the cache).
+- **Bad-track skip** — a track that fails to decode mid-set (removed/region-locked/corrupt) is retried
+  a few times then skipped; one bad track never stalls the party.
+- **Stays awake** — requests a Screen Wake Lock while a set runs so the display/machine won't sleep.
+- **Self-healing transitions** — a watchdog finalizes every handoff off the audio clock, a resume-
+  watchdog restarts a suspended AudioContext, and stale transition timers are invalidated by
+  generation — so the set never stalls or goes silent, even in a throttled background tab.
+
 ## Known limitations / notes
 - **Energy** uses onset/percussive density + low-band (kick/bass) ratio + beat-pulse strength
   (brightness demoted) — much better for dance tracks than the old loudness+treble heuristic,

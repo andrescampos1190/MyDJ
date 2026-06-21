@@ -8,6 +8,62 @@ import { detectKey } from "./keyDetect";
 import { bpmDistance, orderForParty, transitionQuality } from "./ordering";
 
 const API = "http://localhost:8000";
+const AUDIO_CACHE = "mydj-audio-v1"; // compressed audio kept client-side: playback survives a backend restart
+const SESSION_KEY = "mydj-session-v1"; // playlist + position: a tab/browser crash is recoverable
+
+// Best-effort client-side cache of a track's compressed audio (Cache API). Makes
+// mid-set re-decode backend-independent + instant, and lets a reload resume the set.
+async function cacheAudioResponse(url, response) {
+  if (!("caches" in window)) return;
+  try {
+    const c = await caches.open(AUDIO_CACHE);
+    await c.put(url, response);
+  } catch {
+    /* quota exceeded / unavailable — playback falls back to the backend */
+  }
+}
+async function fetchAudioBytes(url) {
+  if ("caches" in window) {
+    try {
+      const c = await caches.open(AUDIO_CACHE);
+      const hit = await c.match(url);
+      if (hit) return await hit.arrayBuffer();
+    } catch {
+      /* fall through to the network */
+    }
+  }
+  const r = await apiFetch(url);
+  if (!r.ok) throw new Error("audio fetch failed");
+  cacheAudioResponse(url, r.clone()); // populate for next time / for resume
+  return await r.arrayBuffer();
+}
+async function evictAudio(url) {
+  if (!("caches" in window)) return;
+  try {
+    const c = await caches.open(AUDIO_CACHE);
+    await c.delete(url);
+  } catch {
+    /* noop */
+  }
+}
+async function clearAudioCache() {
+  if (!("caches" in window)) return;
+  try {
+    await caches.delete(AUDIO_CACHE);
+  } catch {
+    /* noop */
+  }
+}
+
+// fetch() that turns an unreachable-backend network error into a clear, actionable
+// message instead of the browser's cryptic "Failed to fetch".
+async function apiFetch(url, opts) {
+  try {
+    return await fetch(url, opts);
+  } catch {
+    throw new Error(`Can't reach the backend at ${API} — is it running?`);
+  }
+}
 
 // ---- One deck (a single playable track) --------------------------------------
 class Deck {
@@ -271,10 +327,14 @@ export class Engine {
     this.transitions = []; // per-adjacent-pair transition quality (after ordering)
     this.keyLock = false; // pitch-preserving tempo (SoundTouch) when true
     this._txn = 0; // transition generation; stale transition timers no-op
+    this.resumable = null; // {idx} if a crashed set can be resumed (set by _restoreSession)
+    this._wakeLock = null; // Screen Wake Lock sentinel held while a set runs
+    this._saveT = null; // debounce handle for session persistence
     // Create the context + decks up front so the UI always has decks to read.
     // It starts "suspended" (no user gesture yet) and resumes on first load/play.
     this._ensure();
     this.auto = new AutoMix(this); // hands-free auto-mixer (defined below)
+    this._restoreSession(); // re-hydrate a previous (possibly interrupted) set
   }
 
   _ensure() {
@@ -306,24 +366,120 @@ export class Engine {
     if (this.onChange) this.onChange();
   }
 
+  // ---- Crash recovery: persist the set (playlist metadata + position) ----------
+  saveSession() {
+    try {
+      const playlist = this.playlist.map((t) => {
+        const { buffer, _decoding, ...meta } = t; // strip the un-serializable bits
+        return meta;
+      });
+      if (!playlist.length) {
+        localStorage.removeItem(SESSION_KEY);
+        return;
+      }
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({
+          playlist,
+          idx: this.auto.active ? this.auto.idx : 0,
+          loop: this.auto.loop,
+          transitionSecs: this.auto.transitionSecs,
+          active: this.auto.active,
+          ts: Date.now(),
+        })
+      );
+    } catch {
+      /* quota / private mode / unavailable — best-effort */
+    }
+  }
+  _saveSoon() {
+    if (this._saveT) return;
+    this._saveT = setTimeout(() => {
+      this._saveT = null;
+      this.saveSession();
+    }, 800);
+  }
+  clearSession() {
+    try {
+      localStorage.removeItem(SESSION_KEY);
+    } catch {
+      /* noop */
+    }
+  }
+  _restoreSession() {
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (!data || !Array.isArray(data.playlist) || !data.playlist.length) return;
+      this.playlist = data.playlist.map((t) => ({ ...t, buffer: null }));
+      this._recomputeTransitions();
+      this.auto.loop = !!data.loop;
+      if (data.transitionSecs) this.auto.transitionSecs = data.transitionSecs;
+      // Only offer to resume if a set was actually mid-play when it died.
+      if (data.active) {
+        this.resumable = { idx: Math.max(0, Math.min(data.idx || 0, this.playlist.length - 1)) };
+      }
+    } catch {
+      /* corrupt session — ignore */
+    }
+  }
+
+  // ---- Keep the machine awake during an unattended set -------------------------
+  async requestWakeLock() {
+    try {
+      if ("wakeLock" in navigator && !this._wakeLock) {
+        this._wakeLock = await navigator.wakeLock.request("screen");
+        this._wakeLock.addEventListener("release", () => {
+          this._wakeLock = null;
+        });
+      }
+    } catch {
+      /* not granted / unsupported — the set still runs */
+    }
+  }
+  async releaseWakeLock() {
+    try {
+      if (this._wakeLock) {
+        const w = this._wakeLock;
+        this._wakeLock = null;
+        await w.release();
+      }
+    } catch {
+      /* noop */
+    }
+  }
+
   // Backend /api/load (download + convert + key/energy) -> fetch audio -> decode
   // -> client-side BPM + beat offset. Returns a full track object.
   async _fetchAndDecode(url) {
     this._ensure();
     await this.resume();
-    const res = await fetch(`${API}/api/load`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
+    let res;
+    for (let attempt = 0; ; attempt++) {
+      res = await apiFetch(`${API}/api/load`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (res.status === 503 && attempt < 2) {
+        await new Promise((r) => setTimeout(r, 1500)); // transient network — back off + retry
+        continue;
+      }
+      break;
+    }
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
       throw new Error(e.detail || `Load failed (${res.status})`);
     }
     const meta = await res.json(); // {id,title,duration,thumbnail,uploader,audioUrl,key,camelot,energy}
 
-    const audioRes = await fetch(`${API}${meta.audioUrl}`);
+    const fullAudioUrl = `${API}${meta.audioUrl}`;
+    const audioRes = await apiFetch(fullAudioUrl);
     if (!audioRes.ok) throw new Error("Could not fetch audio");
+    // Cache the compressed bytes (so later plays + a post-crash resume don't need the
+    // backend), then decode a copy for analysis.
+    await cacheAudioResponse(fullAudioUrl, audioRes.clone());
     const arr = await audioRes.arrayBuffer();
     const buffer = await this.ctx.decodeAudioData(arr);
 
@@ -363,6 +519,7 @@ export class Engine {
     // long set. It's re-decoded on demand (the backend keeps the mp3 for the session).
     track.buffer = null;
     this.playlist.push(track);
+    this._saveSoon();
     this.emit();
     return track;
   }
@@ -373,9 +530,8 @@ export class Engine {
     if (track.buffer) return Promise.resolve(track.buffer);
     if (!track._decoding) {
       track._decoding = (async () => {
-        const r = await fetch(`${API}${track.audioUrl}`);
-        if (!r.ok) throw new Error("audio fetch failed");
-        const buf = await this.ctx.decodeAudioData(await r.arrayBuffer());
+        const bytes = await fetchAudioBytes(`${API}${track.audioUrl}`); // client cache first
+        const buf = await this.ctx.decodeAudioData(bytes);
         track.buffer = buf;
         return buf;
       })().finally(() => {
@@ -388,13 +544,19 @@ export class Engine {
     if (track) track.buffer = null;
   }
   removeTrack(id) {
-    this.playlist = this.playlist.filter((t) => t.id !== id);
+    const t = this.playlist.find((x) => x.id === id);
+    if (t) evictAudio(`${API}${t.audioUrl}`);
+    this.playlist = this.playlist.filter((x) => x.id !== id);
     this._recomputeTransitions();
+    this._saveSoon();
     this.emit();
   }
   clearPlaylist() {
     this.playlist = [];
     this.transitions = [];
+    this.resumable = null;
+    clearAudioCache();
+    this.clearSession();
     this.emit();
   }
   _recomputeTransitions() {
@@ -408,6 +570,7 @@ export class Engine {
     const { ordered, transitions } = orderForParty(this.playlist, opts);
     this.playlist = ordered;
     this.transitions = transitions;
+    this._saveSoon();
     this.emit();
     return { ordered, transitions };
   }
@@ -418,6 +581,7 @@ export class Engine {
     for (const t of this.playlist) if (!ids.includes(t.id)) ordered.push(t);
     this.playlist = ordered;
     this._recomputeTransitions();
+    this._saveSoon();
     this.emit();
   }
   // Apply the LLM's [{id, genre}] result: reorder + tag each track's genre.
@@ -430,6 +594,7 @@ export class Engine {
     }
     this.reorderByIds(ids);
     for (const t of this.playlist) if (genre[t.id]) t.genre = genre[t.id];
+    this._saveSoon();
     this.emit();
   }
 
@@ -709,15 +874,39 @@ class AutoMix {
     this.engine.emit();
   }
 
-  // The next track index — wraps to 0 when looping, else idx+1.
+  _isBad(i) {
+    const t = this.tracks[i];
+    return !t || (t._fails || 0) >= 3; // 3 failed decodes -> skip this track entirely
+  }
+  // The next non-bad track index — wraps when looping, else n if none remain.
   _nextIdx() {
     const n = this.tracks.length;
-    if (this.loop) return n ? (this.idx + 1) % n : 0;
-    return this.idx + 1;
+    if (!n) return 0;
+    if (this.loop) {
+      for (let k = 1; k <= n; k++) {
+        const j = (this.idx + k) % n;
+        if (j !== this.idx && !this._isBad(j)) return j;
+      }
+      return (this.idx + 1) % n; // everything else is bad — fall back
+    }
+    for (let j = this.idx + 1; j < n; j++) if (!this._isBad(j)) return j;
+    return n;
   }
   _hasNext() {
     const n = this.tracks.length;
-    return this.loop ? n > 1 : this.idx + 1 < n;
+    if (this.loop) {
+      for (let i = 0; i < n; i++) if (i !== this.idx && !this._isBad(i)) return true;
+      return false;
+    }
+    return this._nextIdx() < n;
+  }
+  // The back deck is "ready" only when it actually holds the expected next track. A
+  // failed/zero load leaves a STALE buffer from a prior track, which a bare !buffer
+  // check would mistake for "ready" and transition into.
+  _backReady() {
+    const back = this.engine.other(this.front);
+    const t = this.tracks[this._nextIdx()];
+    return !!(t && back.buffer && back.meta && back.meta.id === t.id);
   }
 
   // Load an already-decoded playlist track into a deck.
@@ -739,7 +928,8 @@ class AutoMix {
     try {
       await this.engine.ensureDecoded(t);
     } catch {
-      return; // decode failed (e.g. 403) — the watch will retry / skip
+      t._fails = (t._fails || 0) + 1; // after a few, _nextIdx() skips this track entirely
+      return;
     }
     if (this.active && t.buffer) this._loadDeck(deckId, idx);
     this._freeFar();
@@ -759,24 +949,28 @@ class AutoMix {
     }
   }
 
-  async start() {
+  async start(startIdx = 0) {
     if (this.active || this.tracks.length === 0) return;
     this.active = true;
-    this.idx = 0;
+    this.idx = Math.max(0, Math.min(startIdx | 0, this.tracks.length - 1));
     this.front = "A";
     this._transitioning = false;
     this._finalize = null;
+    this.engine.resumable = null; // we're live now
     this.engine.keyLock = false; // auto-mix beat-matches; key-lock is a manual-deck feature
+    this.engine.requestWakeLock(); // keep the machine awake for the set
     await this.engine.resume();
     try {
-      await this.engine.ensureDecoded(this.tracks[0]);
+      await this.engine.ensureDecoded(this.tracks[this.idx]);
     } catch {
       this.active = false;
+      this.engine.releaseWakeLock();
       this._set("idle");
       return;
     }
-    if (!this._loadDeck("A", 0)) {
+    if (!this._loadDeck("A", this.idx)) {
       this.active = false;
+      this.engine.releaseWakeLock();
       this._set("idle");
       return;
     }
@@ -786,6 +980,7 @@ class AutoMix {
     this.engine.deckA.onEnded = (d) => this._onEnded(d);
     this.engine.deckB.onEnded = (d) => this._onEnded(d);
     if (this._hasNext()) this._prepareAndLoad("B", this._nextIdx()); // decode + preload next
+    this.engine.saveSession();
     this._startWatch();
   }
 
@@ -797,8 +992,8 @@ class AutoMix {
       return;
     }
     const back = this.engine.other(this.front);
-    if (!back.buffer) {
-      this._prepareAndLoad(back.id, this._nextIdx()); // not decoded yet — _tick fires once ready
+    if (!this._backReady()) {
+      this._prepareAndLoad(back.id, this._nextIdx()); // not ready (decoding/bad) — _tick retries
       return;
     }
     this._beginTransition(back, 4); // cut straight into the next track
@@ -819,6 +1014,8 @@ class AutoMix {
     this.engine.deckA.resetEq();
     this.engine.deckB.resetEq();
     this.engine.setCrossfade(0);
+    this.engine.releaseWakeLock();
+    this.engine.clearSession(); // intentional stop — nothing to resume
     this._set("idle");
   }
 
@@ -860,8 +1057,8 @@ class AutoMix {
       if (ended || front.remaining() <= 0.25) this._finish();
       return;
     }
-    if (!back.buffer) {
-      this._prepareAndLoad(back.id, this._nextIdx()); // decode the next track ahead of time
+    if (!this._backReady()) {
+      this._prepareAndLoad(back.id, this._nextIdx()); // decode/replace the next track ahead of time
       return;
     }
     const dur = front.buffer.duration;
@@ -914,6 +1111,7 @@ class AutoMix {
         this.engine.setCrossfade(back === "B" ? 1 : 0);
         this.front = back;
         this.idx = this._nextIdx();
+        this.engine._saveSoon(); // persist the new position for crash recovery
         this._set("playing");
         if (this._hasNext()) this._prepareAndLoad(fromFront, this._nextIdx()); // load following track
       } catch {
@@ -938,6 +1136,8 @@ class AutoMix {
     this._clearWatch();
     this.engine.deckA.onEnded = null;
     this.engine.deckB.onEnded = null;
+    this.engine.releaseWakeLock();
+    this.engine.clearSession(); // finished cleanly — nothing to resume
     this._set("done");
   }
 }

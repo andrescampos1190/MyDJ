@@ -115,6 +115,19 @@ def _clean_error(exc: Exception) -> str:
     return msg[:300] or "Unsupported or unreachable URL"
 
 
+def _is_network_err(msg: str) -> bool:
+    """Transient connectivity failures (DNS/socket) — retryable, not a bad URL."""
+    m = msg.lower()
+    return any(
+        s in m
+        for s in (
+            "getaddrinfo", "failed to resolve", "name resolution", "connection reset",
+            "network is unreachable", "temporary failure", "connection timed out",
+            "read timed out", "max retries",
+        )
+    )
+
+
 def _cleanup(path: str) -> None:
     try:
         os.remove(path)
@@ -148,7 +161,13 @@ def load(req: UrlRequest):
     try:
         res = download(req.url, "audio")
     except (DownloadError, ExtractorError) as exc:
-        raise HTTPException(status_code=400, detail=_clean_error(exc))
+        msg = _clean_error(exc)
+        if _is_network_err(msg):
+            raise HTTPException(
+                status_code=503,
+                detail="Network/DNS hiccup reaching the source — please retry.",
+            )
+        raise HTTPException(status_code=400, detail=msg)
     except Exception:
         if not shutil.which("ffmpeg"):
             raise HTTPException(

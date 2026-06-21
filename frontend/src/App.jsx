@@ -53,7 +53,10 @@ export default function App() {
       if (ctx && ctx.state === "suspended" && shouldPlay) engine.resume();
     };
     const onVis = () => {
-      if (!document.hidden) wake();
+      if (!document.hidden) {
+        wake();
+        if (engine.auto?.active) engine.requestWakeLock(); // wake locks are dropped while hidden
+      }
     };
     document.addEventListener("visibilitychange", onVis);
     if (engine.ctx) engine.ctx.onstatechange = wake;
@@ -243,14 +246,14 @@ function Playlist({ engine }) {
     }
   }
 
-  async function startSet() {
+  async function startSet(startIdx = 0) {
     setError("");
     if (tracks.length < 2) {
       setError("Add at least two tracks.");
       return;
     }
     try {
-      await auto.start();
+      await auto.start(typeof startIdx === "number" ? startIdx : 0);
     } catch (e) {
       setError(e.message || "Couldn't start the set");
       auto.stop();
@@ -287,6 +290,44 @@ function Playlist({ engine }) {
         </button>
       </div>
       {error && <div className="error">{error}</div>}
+      {engine.resumable && !running && (
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            padding: "8px 10px",
+            margin: "0 0 8px",
+            background: "rgba(34,211,238,0.12)",
+            border: "1px solid rgba(34,211,238,0.35)",
+            borderRadius: 8,
+            fontSize: 13,
+          }}
+        >
+          <span style={{ flex: 1 }}>⟳ A previous set was interrupted.</span>
+          <button
+            className="ghost sm"
+            onClick={() => {
+              const i = engine.resumable?.idx || 0;
+              engine.resumable = null;
+              startSet(i);
+            }}
+          >
+            Resume from track {(engine.resumable.idx || 0) + 1}
+          </button>
+          <button
+            className="x"
+            title="dismiss"
+            onClick={() => {
+              engine.resumable = null;
+              engine.clearSession();
+              engine.emit();
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       <ol className="tracks">
         {tracks.length === 0 && (
@@ -363,7 +404,7 @@ function Playlist({ engine }) {
             ⏹ Stop
           </button>
         ) : (
-          <button className="go" onClick={startSet} disabled={tracks.length < 2}>
+          <button className="go" onClick={() => startSet(0)} disabled={tracks.length < 2}>
             ▶ Start Set
           </button>
         )}
