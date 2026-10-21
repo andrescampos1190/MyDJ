@@ -372,7 +372,8 @@ export class Engine {
   saveSession() {
     try {
       const playlist = this.playlist.map((t) => {
-        const { buffer, _decoding, ...meta } = t; // strip the un-serializable bits
+        // eslint-disable-next-line no-unused-vars -- destructured only to strip the un-serializable bits
+        const { buffer, _decoding, ...meta } = t;
         return meta;
       });
       if (!playlist.length) {

@@ -27,17 +27,36 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
 - **🔒 Key-lock toggle**: pitch-preserving tempo (SoundTouch time-stretch) so beatmatching
   doesn't "chipmunk" the pitch. Off by default (see notes).
 
-## Prerequisites (installed)
-Python 3.12 · ffmpeg + ffprobe on PATH · Node 20+
-Python deps: `fastapi`, `uvicorn`, `yt-dlp`, `numpy`, `scipy`, `anthropic` (see `backend/requirements.txt`).
+## Prerequisites
+Python 3.12+ · ffmpeg + ffprobe on PATH · Node 20.19+ (or 22.12+)
+Python deps: `fastapi`, `uvicorn`, `yt-dlp`, `deno` (the JS runtime yt-dlp needs for
+YouTube), `numpy`, `scipy`, `anthropic` (see `backend/requirements.txt`).
 Node deps: `react`, `vite`, `web-audio-beat-detector`, `soundtouchjs` (key-lock),
 `essentia.js` (key detection — AGPL-3.0, fine for local/personal use).
+
+## First-time setup (from the project root)
+**Windows (PowerShell):**
+```powershell
+python -m venv backend\venv
+backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+npm install --prefix frontend
+```
+**macOS / Linux:**
+```bash
+python3 -m venv backend/venv
+backend/venv/bin/python -m pip install -r backend/requirements.txt
+npm install --prefix frontend
+```
+Already have a venv from before? Re-run the `pip install` line — it adds `deno`, without
+which yt-dlp can't solve YouTube's JS challenges and YouTube tracks fail to load.
 
 ## Run it (two terminals, from the project root)
 **Backend** (no `--reload` — see note):
 ```powershell
 backend\venv\Scripts\python.exe -m uvicorn main:app --app-dir backend --port 8000
 ```
+(macOS/Linux: `backend/venv/bin/python -m uvicorn main:app --app-dir backend --port 8000`)
+On Windows, `.\start.ps1` launches both in one go.
 **Frontend:**
 ```powershell
 npm run dev --prefix frontend
