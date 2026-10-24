@@ -22,6 +22,10 @@ services:
         sync: false   # optional, enables AI Polish
       - key: ALLOWED_ORIGINS
         sync: false   # set to the frontend URL after first deploy
+      # YouTube bot-checks Render's IPs. Add a Secret File named cookies.txt (a
+      # YouTube cookies export) on the service; Render mounts it at this path.
+      - key: YTDLP_COOKIES_FILE
+        value: /etc/secrets/cookies.txt
 
   - type: web
     name: mydj-frontend

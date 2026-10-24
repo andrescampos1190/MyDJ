@@ -91,7 +91,6 @@ function DeckMini({ engine, which }) {
   const running = engine.auto.active; // manual controls are locked during an auto-set
   const dur = has ? d.buffer.duration : 0;
   const pos = d.position();
-  const pct = dur ? (pos / dur) * 100 : 0;
   return (
     <div className={`deck deck-${which} ${d.isPlaying ? "live" : ""}`}>
       <div className="deck-head">

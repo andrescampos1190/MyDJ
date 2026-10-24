@@ -122,6 +122,18 @@ def _clean_error(exc: Exception) -> str:
     return msg[:300] or "Unsupported or unreachable URL"
 
 
+def _is_bot_check(msg: str) -> bool:
+    """YouTube refusing an anonymous request (typical from cloud/datacenter IPs)."""
+    m = msg.lower()
+    return "confirm you" in m and "not a bot" in m
+
+
+BOT_CHECK_DETAIL = (
+    "YouTube is blocking this server as a bot (common on cloud hosts). Give the backend "
+    "YouTube cookies via YTDLP_COOKIES_FILE — see the README."
+)
+
+
 def _is_network_err(msg: str) -> bool:
     """Transient connectivity failures (DNS/socket) — retryable, not a bad URL."""
     m = msg.lower()
@@ -153,7 +165,8 @@ def info(req: UrlRequest):
     try:
         return get_info(req.url)
     except (DownloadError, ExtractorError) as exc:
-        raise HTTPException(status_code=400, detail=_clean_error(exc))
+        msg = _clean_error(exc)
+        raise HTTPException(status_code=400, detail=BOT_CHECK_DETAIL if _is_bot_check(msg) else msg)
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch info for this URL")
 
@@ -174,6 +187,8 @@ def load(req: UrlRequest):
                 status_code=503,
                 detail="Network/DNS hiccup reaching the source — please retry.",
             )
+        if _is_bot_check(msg):
+            raise HTTPException(status_code=400, detail=BOT_CHECK_DETAIL)
         raise HTTPException(status_code=400, detail=msg)
     except Exception:
         if not shutil.which("ffmpeg"):

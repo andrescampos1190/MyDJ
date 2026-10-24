@@ -27,17 +27,36 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
 - **🔒 Key-lock toggle**: pitch-preserving tempo (SoundTouch time-stretch) so beatmatching
   doesn't "chipmunk" the pitch. Off by default (see notes).
 
-## Prerequisites (installed)
-Python 3.12 · ffmpeg + ffprobe on PATH · Node 20+
-Python deps: `fastapi`, `uvicorn`, `yt-dlp`, `numpy`, `scipy`, `anthropic` (see `backend/requirements.txt`).
+## Prerequisites
+Python 3.12+ · ffmpeg + ffprobe on PATH · Node 20.19+ (or 22.12+)
+Python deps: `fastapi`, `uvicorn`, `yt-dlp`, `deno` (the JS runtime yt-dlp needs for
+YouTube), `numpy`, `scipy`, `anthropic` (see `backend/requirements.txt`).
 Node deps: `react`, `vite`, `web-audio-beat-detector`, `soundtouchjs` (key-lock),
 `essentia.js` (key detection — AGPL-3.0, fine for local/personal use).
+
+## First-time setup (from the project root)
+**Windows (PowerShell):**
+```powershell
+python -m venv backend\venv
+backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+npm install --prefix frontend
+```
+**macOS / Linux:**
+```bash
+python3 -m venv backend/venv
+backend/venv/bin/python -m pip install -r backend/requirements.txt
+npm install --prefix frontend
+```
+Already have a venv from before? Re-run the `pip install` line — it adds `deno`, without
+which yt-dlp can't solve YouTube's JS challenges and YouTube tracks fail to load.
 
 ## Run it (two terminals, from the project root)
 **Backend** (no `--reload` — see note):
 ```powershell
 backend\venv\Scripts\python.exe -m uvicorn main:app --app-dir backend --port 8000
 ```
+(macOS/Linux: `backend/venv/bin/python -m uvicorn main:app --app-dir backend --port 8000`)
+On Windows, `.\start.ps1` launches both in one go.
 **Frontend:**
 ```powershell
 npm run dev --prefix frontend
@@ -56,6 +75,24 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."   # then start uvicorn in the same termina
 Without the key, AI Polish returns a friendly "set ANTHROPIC_API_KEY" message; the
 algorithmic **Order for Party** works regardless. Model: `claude-opus-4-8` (change in
 `backend/llm_order.py`).
+
+## Tests
+Everything runs offline against synthesized tracks with known keys (needs ffmpeg).
+```bash
+# backend: analyzer (key/energy/structure) + API (download → convert → analyze → stream)
+backend/venv/bin/python -m pip install -r backend/requirements-dev.txt
+cd backend && venv/bin/python -m pytest          # Windows: venv\Scripts\python.exe -m pytest
+
+# frontend: lint + ordering unit tests
+npm run lint --prefix frontend && npm test --prefix frontend
+
+# browser end-to-end: starts backend + frontend + a local media server, adds tracks,
+# orders them, starts a set, and checks audio plays and auto-transitions to track 2
+cd frontend && npx playwright install chromium && npm run test:e2e
+```
+Real YouTube/SoundCloud downloads are covered by `backend/tests/test_live.py`, which only
+runs with `MYDJ_LIVE=1` (it needs internet). GitHub Actions (`.github/workflows/ci.yml`) runs
+all of the above on every push, plus a Docker build check and the live tests.
 
 ## How to use
 1. Paste track URLs into the **Playlist** box → **+ Add** (each is downloaded + analyzed; you'll
@@ -129,11 +166,27 @@ blueprint for the backend + static frontend.
    - backend `ANTHROPIC_API_KEY` (optional, enables AI Polish)
 3. Backend health-check path is `/api/health`. The free tier (512 MB) may OOM on
    download+ffmpeg+analysis — move to a paid instance if it does.
+4. **YouTube cookies** (needed for YouTube on Render — see below): on `mydj-backend` →
+   Environment → **Secret Files**, add `cookies.txt`. The blueprint already points
+   `YTDLP_COOKIES_FILE` at `/etc/secrets/cookies.txt`; without the file it's ignored.
 
-> ⚠️ **Two realities of cloud-hosting a yt-dlp app:** (1) YouTube frequently **blocks datacenter
-> IPs** (Render/AWS/…) with a bot check, so downloads that work from home often fail in the cloud;
-> (2) it's an **open, no-auth downloader** — anyone with the URL can drive your server. Built for
-> personal use; deploy at your own risk.
+### YouTube "Sign in to confirm you're not a bot"
+YouTube bot-checks datacenter IPs (Render, AWS, GitHub Actions…), so YouTube tracks that load
+fine from home fail in the cloud with this message. SoundCloud and others are unaffected.
+The fix is to give yt-dlp a logged-in YouTube session as a `cookies.txt` (Netscape format):
+1. Use a **throwaway Google account** — cookies used from a server can get an account flagged.
+2. In a private/incognito window, log in to YouTube, export cookies for `youtube.com` with a
+   "cookies.txt" browser extension, then close the window without logging out (so the session
+   isn't rotated). Details: yt-dlp wiki → *Exporting YouTube cookies*.
+3. Point the backend at it with `YTDLP_COOKIES_FILE=/path/to/cookies.txt` (Render: the Secret File
+   above). The file is copied to a writable temp file, so read-only secret mounts are fine.
+4. To have CI's live test check it, add the file's contents as a repo secret named `YTDLP_COOKIES`
+   (GitHub → Settings → Secrets and variables → Actions).
+
+Cookies expire or get rotated; when YouTube loads start failing again, re-export them.
+
+> ⚠️ It's an **open, no-auth downloader** — anyone with the URL can drive your server (and your
+> YouTube cookies). Built for personal use; deploy at your own risk.
 
 ## Stretch ideas
 Stem-based transitions · ML-based energy/danceability · drag-to-reorder · save/record the mix ·
