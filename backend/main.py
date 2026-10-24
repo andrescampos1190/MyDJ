@@ -11,6 +11,7 @@ import glob
 import os
 import re
 import shutil
+import threading
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
@@ -116,6 +117,8 @@ class OrderRequest(BaseModel):
 class PartyRequest(BaseModel):
     url: str
     name: str = ""
+    voter: str = ""
+    title: str = ""  # from the search result, so phones can show it while it downloads
 
 
 class VoteRequest(BaseModel):
@@ -316,14 +319,29 @@ def search_songs(q: str):
         raise HTTPException(status_code=400, detail=BOT_CHECK_DETAIL if _is_bot_check(msg) else msg)
 
 
+_load_slots = threading.Semaphore(2)  # downloads at once from friends' requests
+
+
+def _fulfil(rid: str, url: str) -> None:
+    try:
+        with _load_slots:
+            track = _load_track(url)
+        party.finish_request(rid, {**track, "url": url})
+    except HTTPException as exc:
+        party.fail_request(rid, str(exc.detail))
+    except Exception:
+        party.fail_request(rid, "Couldn't add this song")
+
+
 @app.post("/api/party/request")
 def party_request(req: PartyRequest):
-    """A guest adds a song: download + analyze now, the host picks it up on its next sync."""
-    track = _load_track(req.url)
-    track["url"] = req.url
-    track["addedBy"] = req.name.strip()[:30] or "Guest"
-    party.request(track)
-    return {"id": track["id"], "title": track["title"]}
+    """A guest adds a song. Answers at once; the download + analysis (10-30 s) runs in the
+    background, phones see its status, and the host picks it up when it's ready."""
+    _validate_url(req.url)
+    rid = party.start_request(req.title.strip()[:200] or None, req.name.strip()[:30] or "Guest",
+                              req.voter[:64])
+    threading.Thread(target=_fulfil, args=(rid, req.url), daemon=True).start()
+    return {"rid": rid}
 
 
 @app.post("/api/party/vote")
@@ -335,8 +353,9 @@ def party_vote(req: VoteRequest):
 
 
 @app.get("/api/party/queue")
-def party_queue(voter: str = ""):
-    return party.view(voter[:64])
+def party_queue(voter: str = "", name: str = ""):
+    """A phone's poll: the queue to show, and a presence ping for the DJ's screen."""
+    return party.view(voter[:64], name.strip()[:30])
 
 
 @app.post("/api/party/sync")

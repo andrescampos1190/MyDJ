@@ -1,26 +1,25 @@
-import { expect, test } from "@playwright/test";
+import { expect, test as base } from "@playwright/test";
 import { API_PORT, MEDIA_PORT } from "../playwright.config.js";
 
 const MEDIA = `http://127.0.0.1:${MEDIA_PORT}`;
 const API = `http://127.0.0.1:${API_PORT}`;
 
-test("friends add songs from their phones and votes reorder the queue", async ({ browser }) => {
-  test.setTimeout(180_000);
-  // The DJ's computer and a friend's phone: separate contexts, like separate devices.
-  const host = await (await browser.newContext()).newPage();
-  const phone = await (await browser.newContext({ viewport: { width: 390, height: 844 } })).newPage();
-  const errors = [];
-  for (const p of [host, phone]) p.on("pageerror", (e) => errors.push(e.message));
+// `device(opts)` opens a page in its own browser context (separate storage, like a separate
+// phone or computer); all of them close when the test ends, so no stale DJ keeps syncing.
+const test = base.extend({
+  device: async ({ browser }, provide) => {
+    const made = [];
+    await provide(async (opts) => {
+      const ctx = await browser.newContext(opts);
+      made.push(ctx);
+      return ctx.newPage();
+    });
+    for (const ctx of made) await ctx.close();
+  },
+});
 
-  await host.goto("/");
-  await host.locator(".loadbar input").fill(`${MEDIA}/G_major.mp3`);
-  await host.locator(".loadbar button").click();
-  const rows = host.locator(".tracks li");
-  await expect(rows).toHaveCount(1, { timeout: 60_000 });
-  await host.getByRole("button", { name: /Party session: OFF/ }).click();
-  await expect(host.getByRole("button", { name: /Party session: ON/ })).toBeVisible();
-
-  // YouTube search isn't reachable offline: answer it with the local test songs.
+// YouTube search isn't reachable offline: answer it with the local test songs.
+async function fakeSearch(phone) {
   await phone.route("**/api/search?**", (route) =>
     route.fulfill({
       json: {
@@ -31,28 +30,60 @@ test("friends add songs from their phones and votes reorder the queue", async ({
       },
     })
   );
-  await phone.goto("/guest");
-  await phone.getByLabel("What's your name?").fill("Ana");
-  await phone.getByRole("button", { name: "Join" }).click();
+}
 
-  // Search by name and add.
+async function join(phone, name) {
+  await phone.goto("/guest");
+  await phone.getByLabel("What's your name?").fill(name);
+  await phone.getByRole("button", { name: "Join" }).click();
+}
+
+test("friends add songs from their phones and votes reorder the queue", async ({ device }) => {
+  test.setTimeout(180_000);
+  // The DJ's computer and a friend's phone: separate contexts, like separate devices.
+  const host = await device();
+  const phone = await device({ viewport: { width: 390, height: 844 } });
+  const errors = [];
+  for (const p of [host, phone]) p.on("pageerror", (e) => errors.push(e.message));
+
+  await host.goto("/");
+  await host.locator(".loadbar input").fill(`${MEDIA}/G_major.mp3`);
+  await host.locator(".loadbar button").click();
+  const rows = host.locator(".tracks li");
+  await expect(rows).toHaveCount(1, { timeout: 60_000 });
+  await host.getByRole("button", { name: /Party session: OFF/ }).click();
+
+  // The DJ's panel checks the network and waits for a phone.
+  const status = host.locator(".party-status");
+  await expect(status).toContainText("Music server reachable on your network", { timeout: 10_000 });
+  await expect(status).toContainText("App reachable on your network");
+  await expect(status).toContainText("No phones connected yet");
+
+  await fakeSearch(phone);
+  await join(phone, "Ana");
+  await expect(phone.locator(".g-conn")).toContainText("Connected to the DJ");
+  await expect(status).toContainText("1 phone connected: Ana", { timeout: 5_000 });
+
+  // Search by name: the request is confirmed at once, then shows progress.
   await phone.getByPlaceholder("Search a song or paste a link").fill("minor");
   await phone.getByRole("button", { name: "Search" }).click();
   const result = phone.locator(".g-results li", { hasText: "A_minor" });
   await result.getByRole("button", { name: /Add/ }).click();
-  await expect(result.getByRole("button", { name: "Added ✓" })).toBeVisible({ timeout: 60_000 });
+  await expect(result.getByRole("button", { name: "Requested ✓" })).toBeVisible({ timeout: 5_000 });
+  await expect(phone.locator(".g-song.pending", { hasText: "A_minor" })).toBeVisible();
 
   // ...or paste a link.
   await phone.getByPlaceholder("Search a song or paste a link").fill(`${MEDIA}/C_major.mp3`);
   await phone.getByRole("button", { name: "Search" }).click();
   const pasted = phone.locator(".g-results li"); // a pasted link replaces the search results
   await expect(pasted).toHaveCount(1);
-  await expect(pasted.getByRole("button", { name: "Added ✓" })).toBeVisible({ timeout: 60_000 });
+  await expect(pasted.getByRole("button", { name: "Requested ✓" })).toBeVisible({ timeout: 5_000 });
 
-  // Both land in the DJ's playlist, credited to Ana.
-  await expect(rows).toHaveCount(3, { timeout: 30_000 });
+  // Both land in the DJ's playlist, credited to Ana, and leave "On the way".
+  await expect(rows).toHaveCount(3, { timeout: 60_000 });
   await expect(host.locator(".tracks li", { hasText: "A_minor" })).toContainText("Ana");
   await expect(host.locator(".tracks li", { hasText: "C_major" })).toContainText("Ana");
+  await expect(phone.locator(".g-song.pending")).toHaveCount(0, { timeout: 5_000 });
 
   // The phone sees the queue; an upvote sends C_major to the top.
   const song = (title) => phone.locator(".g-song", { hasText: title });
@@ -80,4 +111,42 @@ test("friends add songs from their phones and votes reorder the queue", async ({
 
   await host.getByRole("button", { name: /Stop/ }).click();
   expect(errors).toEqual([]);
+});
+
+test("phones get clear feedback when something's wrong", async ({ device }) => {
+  test.setTimeout(120_000);
+  const host = await device();
+  const phone = await device({ viewport: { width: 390, height: 844 } });
+  await host.goto("/");
+  await host.getByRole("button", { name: /Party session: OFF/ }).click();
+  await join(phone, "Ben");
+  const bar = phone.locator(".g-conn");
+  await expect(bar).toContainText("Connected to the DJ");
+
+  // A link that can't be added: the requester sees why.
+  await phone.getByPlaceholder("Search a song or paste a link").fill(`${MEDIA}/missing.mp3`);
+  await phone.getByRole("button", { name: "Search" }).click();
+  await expect(phone.locator(".g-song.pending.failed")).toContainText("couldn't add", {
+    timeout: 30_000,
+  });
+
+  // The connection drops mid-party, then comes back.
+  await phone.route("**/api/party/queue?**", (route) => route.abort());
+  await expect(bar).toContainText("Lost connection to the DJ", { timeout: 10_000 });
+  await expect(bar).toContainText("same Wi-Fi");
+  await phone.unroute("**/api/party/queue?**");
+  await expect(bar).toContainText("Connected to the DJ", { timeout: 10_000 });
+
+  // A phone that never reaches the music server (e.g. firewall on the DJ's computer).
+  const blocked = await device();
+  await blocked.route("**/api/party/**", (route) => route.abort());
+  await join(blocked, "Cy");
+  await expect(blocked.locator(".g-conn")).toContainText("Can't reach the DJ's music server", {
+    timeout: 15_000,
+  });
+  await expect(blocked.locator(".g-conn")).toContainText("Windows Firewall");
+
+  // The DJ turns the party session off: phones are told (after the 10 s heartbeat timeout).
+  await host.getByRole("button", { name: /Party session: ON/ }).click();
+  await expect(bar).toContainText("party session is off", { timeout: 20_000 });
 });

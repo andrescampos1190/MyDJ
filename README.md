@@ -68,9 +68,11 @@ which yt-dlp can't solve YouTube's JS challenges and YouTube tracks fail to load
 ## Run it (two terminals, from the project root)
 **Backend** (no `--reload` — see note):
 ```powershell
-backend\venv\Scripts\python.exe -m uvicorn main:app --app-dir backend --port 8000
+backend\venv\Scripts\python.exe -m uvicorn main:app --app-dir backend --host 0.0.0.0 --port 8000
 ```
-(macOS/Linux: `backend/venv/bin/python -m uvicorn main:app --app-dir backend --port 8000`)
+(macOS/Linux: `backend/venv/bin/python -m uvicorn main:app --app-dir backend --host 0.0.0.0 --port 8000`)
+`--host 0.0.0.0` lets phones on your Wi-Fi reach it for the party session; without it, only this
+computer can.
 On Windows, `.\start.ps1` launches both in one go.
 **Frontend:**
 ```powershell
@@ -129,7 +131,8 @@ all of the above on every push, plus a Docker build check and the live tests.
 2. In the app, turn on **📱 Party session**. A QR code and a link like
    `http://192.168.1.23:5173/guest` appear.
 3. Friends on the **same Wi-Fi** scan the code, type their name once, then:
-   - **search** for a song by name (top YouTube results) or **paste a link**, and tap **＋ Add**;
+   - **search** for a song by name (top YouTube results) or **paste a link**, and tap **＋ Add** —
+     it's confirmed at once and shows under "On the way" while it downloads (usually 10–30 s);
    - **▲ / ▼ vote** on anything queued (tap again to take a vote back).
 4. How the queue reacts:
    - **Votes win, the mix stays smooth:** songs with more net votes play sooner; among songs with
@@ -139,6 +142,20 @@ all of the above on every push, plus a Docker build check and the live tests.
    - The song playing and the one already mixing in never move.
    - You can still reorder/remove on the DJ screen; votes re-sort the queue whenever they change.
    - Friends' songs show who added them (👤) and their votes (▲ / ▼).
+
+### Phones can't connect?
+The DJ's party panel shows a live checklist: whether the music server and the app answer on your
+network, and which phones are connected — once a phone shows up there, it's working. Phones show
+a status bar too (connected / lost connection / can't reach the music server). If a phone can't
+open the link or join:
+- It must be on the **same Wi-Fi** as the computer — not mobile data, and not a "guest" Wi-Fi
+  (those usually stop devices from seeing each other).
+- **Windows Firewall:** Start → "Allow an app through Windows Firewall" → Change settings → tick
+  **Private** for **Node.js JavaScript Runtime** and **Python**.
+- Your Wi-Fi must be a **Private** network: Settings → Network & internet → Wi-Fi → your network →
+  Network profile type → Private.
+- Turn off VPNs. If the panel lists more than one address, try the others (Windows can have
+  virtual adapters, e.g. from WSL or Hyper-V).
 
 > Anyone on your Wi-Fi can open the party page and add songs. It's meant for your home network;
 > don't port-forward it to the internet.
