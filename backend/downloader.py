@@ -7,6 +7,8 @@ get structured info dicts and clean exceptions. ffmpeg/ffprobe must be on PATH.
 import glob
 import os
 import re
+import shutil
+import tempfile
 import uuid
 
 import yt_dlp
@@ -25,6 +27,28 @@ _NET_OPTS = {
     "fragment_retries": 5,
     "extractor_retries": 3,
 }
+
+
+# Optional cookies (Netscape cookies.txt) for sites that block anonymous/datacenter
+# requests — notably YouTube's "Sign in to confirm you're not a bot" on cloud hosts.
+# yt-dlp writes refreshed cookies back to the file, and secret mounts (e.g. Render's
+# /etc/secrets/) are read-only, so we work from a private writable copy.
+_cookie_copy: str | None = None
+
+
+def _cookie_opts() -> dict:
+    global _cookie_copy
+    src = os.environ.get("YTDLP_COOKIES_FILE")
+    if not src:
+        return {}
+    if not os.path.isfile(src):
+        print(f"WARNING: YTDLP_COOKIES_FILE={src!r} not found — continuing without cookies.")
+        return {}
+    if _cookie_copy is None or not os.path.isfile(_cookie_copy):
+        fd, _cookie_copy = tempfile.mkstemp(prefix="mydj-cookies-", suffix=".txt")
+        os.close(fd)
+        shutil.copyfile(src, _cookie_copy)
+    return {"cookiefile": _cookie_copy}
 
 
 def _ensure_download_dir() -> None:
@@ -55,6 +79,7 @@ def get_info(url: str) -> dict:
     """
     opts = {
         **_NET_OPTS,
+        **_cookie_opts(),
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
@@ -87,6 +112,7 @@ def download(url: str, mode: str) -> dict:
 
     opts = {
         **_NET_OPTS,
+        **_cookie_opts(),
         "outtmpl": outtmpl,
         "noplaylist": True,
         "quiet": True,

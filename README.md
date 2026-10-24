@@ -166,11 +166,27 @@ blueprint for the backend + static frontend.
    - backend `ANTHROPIC_API_KEY` (optional, enables AI Polish)
 3. Backend health-check path is `/api/health`. The free tier (512 MB) may OOM on
    download+ffmpeg+analysis — move to a paid instance if it does.
+4. **YouTube cookies** (needed for YouTube on Render — see below): on `mydj-backend` →
+   Environment → **Secret Files**, add `cookies.txt`. The blueprint already points
+   `YTDLP_COOKIES_FILE` at `/etc/secrets/cookies.txt`; without the file it's ignored.
 
-> ⚠️ **Two realities of cloud-hosting a yt-dlp app:** (1) YouTube frequently **blocks datacenter
-> IPs** (Render/AWS/…) with a bot check, so downloads that work from home often fail in the cloud;
-> (2) it's an **open, no-auth downloader** — anyone with the URL can drive your server. Built for
-> personal use; deploy at your own risk.
+### YouTube "Sign in to confirm you're not a bot"
+YouTube bot-checks datacenter IPs (Render, AWS, GitHub Actions…), so YouTube tracks that load
+fine from home fail in the cloud with this message. SoundCloud and others are unaffected.
+The fix is to give yt-dlp a logged-in YouTube session as a `cookies.txt` (Netscape format):
+1. Use a **throwaway Google account** — cookies used from a server can get an account flagged.
+2. In a private/incognito window, log in to YouTube, export cookies for `youtube.com` with a
+   "cookies.txt" browser extension, then close the window without logging out (so the session
+   isn't rotated). Details: yt-dlp wiki → *Exporting YouTube cookies*.
+3. Point the backend at it with `YTDLP_COOKIES_FILE=/path/to/cookies.txt` (Render: the Secret File
+   above). The file is copied to a writable temp file, so read-only secret mounts are fine.
+4. To have CI's live test check it, add the file's contents as a repo secret named `YTDLP_COOKIES`
+   (GitHub → Settings → Secrets and variables → Actions).
+
+Cookies expire or get rotated; when YouTube loads start failing again, re-export them.
+
+> ⚠️ It's an **open, no-auth downloader** — anyone with the URL can drive your server (and your
+> YouTube cookies). Built for personal use; deploy at your own risk.
 
 ## Stretch ideas
 Stem-based transitions · ML-based energy/danceability · drag-to-reorder · save/record the mix ·

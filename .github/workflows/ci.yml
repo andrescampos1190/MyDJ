@@ -83,6 +83,16 @@ jobs:
           cache-dependency-path: backend/requirements*.txt
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      # Optional repo secret YTDLP_COOKIES (a cookies.txt export) gets past YouTube's
+      # bot check on CI runners — the same fix as YTDLP_COOKIES_FILE on Render.
+      - name: Use YouTube cookies if configured
+        env:
+          YTDLP_COOKIES: ${{ secrets.YTDLP_COOKIES }}
+        run: |
+          if [ -n "$YTDLP_COOKIES" ]; then
+            printf '%s\n' "$YTDLP_COOKIES" > "$RUNNER_TEMP/cookies.txt"
+            echo "YTDLP_COOKIES_FILE=$RUNNER_TEMP/cookies.txt" >> "$GITHUB_ENV"
+          fi
       - run: python -m pytest -v tests/test_live.py
         working-directory: backend
         env:
