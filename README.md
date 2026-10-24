@@ -76,6 +76,24 @@ Without the key, AI Polish returns a friendly "set ANTHROPIC_API_KEY" message; t
 algorithmic **Order for Party** works regardless. Model: `claude-opus-4-8` (change in
 `backend/llm_order.py`).
 
+## Tests
+Everything runs offline against synthesized tracks with known keys (needs ffmpeg).
+```bash
+# backend: analyzer (key/energy/structure) + API (download → convert → analyze → stream)
+backend/venv/bin/python -m pip install -r backend/requirements-dev.txt
+cd backend && venv/bin/python -m pytest          # Windows: venv\Scripts\python.exe -m pytest
+
+# frontend: lint + ordering unit tests
+npm run lint --prefix frontend && npm test --prefix frontend
+
+# browser end-to-end: starts backend + frontend + a local media server, adds tracks,
+# orders them, starts a set, and checks audio plays and auto-transitions to track 2
+cd frontend && npx playwright install chromium && npm run test:e2e
+```
+Real YouTube/SoundCloud downloads are covered by `backend/tests/test_live.py`, which only
+runs with `MYDJ_LIVE=1` (it needs internet). GitHub Actions (`.github/workflows/ci.yml`) runs
+all of the above on every push, plus a Docker build check and the live tests.
+
 ## How to use
 1. Paste track URLs into the **Playlist** box → **+ Add** (each is downloaded + analyzed; you'll
    see its BPM / Camelot key / energy chips).

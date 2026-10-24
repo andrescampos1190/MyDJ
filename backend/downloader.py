@@ -12,7 +12,8 @@ import uuid
 import yt_dlp
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
+# Overridable so tests (or a host with a separate scratch disk) can point it elsewhere.
+DOWNLOAD_DIR = os.environ.get("MYDJ_DOWNLOAD_DIR") or os.path.join(BASE_DIR, "downloads")
 
 # Resilience for flaky networks: a bounded socket timeout (so a bad connection fails
 # fast instead of hanging a worker thread) + internal retries (so a transient DNS/HTTP

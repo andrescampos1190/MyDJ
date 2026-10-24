@@ -12,3 +12,4 @@ node_modules/
 .claude/
 dist/
 *.ps1
+backend/tests/

@@ -1,0 +1,45 @@
+// Browser end-to-end test: real backend + Vite dev server + a local media server
+// serving synthesized tracks, so the full add → analyze → mix flow runs offline.
+// Uses its own ports so it doesn't collide with a running dev setup.
+import { defineConfig } from "@playwright/test";
+import os from "node:os";
+import path from "node:path";
+
+const isWin = process.platform === "win32";
+const python =
+  process.env.MYDJ_PYTHON ||
+  path.join("..", "backend", "venv", isWin ? "Scripts\\python.exe" : "bin/python");
+const API_PORT = 8765;
+const WEB_PORT = 5175;
+const MEDIA_PORT = 9765;
+
+export default defineConfig({
+  testDir: "e2e",
+  timeout: 120_000,
+  reporter: "list",
+  use: {
+    baseURL: `http://localhost:${WEB_PORT}`,
+    launchOptions: { args: ["--autoplay-policy=no-user-gesture-required"] },
+  },
+  webServer: [
+    {
+      command: `"${python}" -m uvicorn main:app --app-dir ../backend --port ${API_PORT}`,
+      url: `http://127.0.0.1:${API_PORT}/api/health`,
+      env: {
+        ALLOWED_ORIGINS: `http://localhost:${WEB_PORT}`,
+        MYDJ_DOWNLOAD_DIR: path.join(os.tmpdir(), "mydj-e2e-downloads"),
+      },
+    },
+    {
+      command: `"${python}" ../backend/tests/serve_media.py ${MEDIA_PORT}`,
+      url: `http://127.0.0.1:${MEDIA_PORT}/A_minor.mp3`,
+    },
+    {
+      command: `npx vite --port ${WEB_PORT} --strictPort`,
+      url: `http://localhost:${WEB_PORT}`,
+      env: { VITE_API_URL: `http://127.0.0.1:${API_PORT}` },
+    },
+  ],
+});
+
+export { MEDIA_PORT };
