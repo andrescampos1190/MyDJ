@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { MEDIA_PORT } from "../playwright.config.js";
+import { MEDIA_PORT, STEMS_WEB_PORT } from "../playwright.config.js";
 
 const MEDIA = `http://127.0.0.1:${MEDIA_PORT}`;
 // The grooves' true grids (see backend/tests/serve_media.py) — ground truth, not the
@@ -12,16 +12,24 @@ const TRUTH = {
   intro_song: { bpm: 124.0, down: 0.3 },
   drop_a: { bpm: 124.0, down: 0.5 },
   drop_b: { bpm: 125.0, down: 0.2 },
+  vocal_a: { bpm: 124.0, down: 0.5 },
+  vocal_b: { bpm: 124.0, down: 0.3 },
 };
 
-// Add the songs, put names[0] first, optionally tag genres / turn Party mode off, start.
-async function load(page, names, { genres, party = true } = {}) {
+// Add the songs, put names[0] first, optionally tag genres / turn Party mode off / wait
+// for their vocals to be split, then start the set.
+async function load(page, names, { genres, party = true, stems = false } = {}) {
   await page.goto("/");
   for (const name of names) {
     await page.getByLabel("Search a song or paste a link").fill(`${MEDIA}/${name}.mp3`);
     await page.getByLabel("Search a song or paste a link").press("Enter");
     await expect(page.locator(".tracks li", { hasText: name })).toBeVisible({ timeout: 60_000 });
   }
+  if (stems)
+    for (const name of names)
+      await expect(page.locator(".tracks li", { hasText: name })).toContainText("🎤 vocals split", {
+        timeout: 300_000,
+      });
   const rows = page.locator(".tracks li");
   if (!(await rows.nth(0).textContent()).includes(names[0]))
     await rows.nth(1).getByRole("button", { name: "Move up" }).click();
@@ -248,4 +256,48 @@ test("two electronic tracks: a double drop lands both drops together", async ({ 
   expect(Math.abs(incDrop - 15.56)).toBeLessThan(0.1);
   expectLocked(samples);
   await stop(page);
+});
+
+test.describe("with vocal separation on", () => {
+  test.use({ baseURL: `http://localhost:${STEMS_WEB_PORT}` });
+
+  test("two singers: the vocals swap on the bar line, the beat stays locked", async ({ page }) => {
+    test.setTimeout(480_000);
+    const stemRequests = [];
+    page.on("request", (r) => r.url().includes("/api/stems/") && stemRequests.push(r.url()));
+    await load(page, ["vocal_a", "vocal_b"], { stems: true });
+    const now = page.getByRole("region", { name: "Now playing" });
+    await expect(now).toContainText("vocal swap", { timeout: 30_000 });
+    // Both decks play the songs as stems (instrumental + vocals).
+    expect(await page.evaluate(() => !!(window.engine.deckA.vocals && window.engine.deckB.vocals))).toBe(true);
+    expect(stemRequests.some((u) => u.endsWith("/vocals"))).toBe(true);
+
+    await now.getByRole("button", { name: /Mix now/ }).click();
+    const [{ samples, plan }, vox] = await Promise.all([
+      alignment(page),
+      page.evaluate(async () => {
+        const e = window.engine;
+        const out = e.deck(e.auto.front);
+        const inc = e.other(e.auto.front);
+        const seen = [];
+        for (let i = 0; i < 400 && e.auto.status === "transitioning"; i++) {
+          await new Promise((r) => setTimeout(r, 50));
+          if (out.isPlaying && inc.isPlaying && e.ctx.currentTime >= inc._startCtxTime)
+            seen.push([out.vox.gain.value, inc.vox.gain.value]);
+        }
+        return seen;
+      }),
+    ]);
+    // vocal_b sings from bar 2: the swap is there, 8 beats in.
+    expect(plan.vocalSwap).toBe(8);
+    expect(plan.beats).toBe(32); // a full-length blend, safe with the swap
+    const before = vox.findIndex(([o, i]) => o === 1 && i === 0); // outgoing sings, incoming held
+    const after = vox.findIndex(([o, i]) => o === 0 && i === 1); // handed over
+    expect(before).toBeGreaterThanOrEqual(0);
+    expect(after).toBeGreaterThan(before);
+    expect(vox.slice(after).every(([o, i]) => o === 0 && i === 1)).toBe(true); // never both
+    expectLocked(samples); // two stems per deck, still on the beat
+    await expect(page.locator(".set-status")).toContainText("Live · song 2 of 2", { timeout: 20_000 });
+    await stop(page);
+  });
 });

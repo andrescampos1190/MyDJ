@@ -188,9 +188,19 @@ function songMeta(t) {
     t.camelot ? `${t.camelot}${t.key ? ` · ${t.key}` : ""}` : null,
     t.energy != null ? `⚡${t.energy}` : null,
     t.genre,
+    stemsLabel(t),
   ]
     .filter(Boolean)
     .join(" · ");
+}
+
+// Vocal separation progress (it runs in the background, ~a minute per song).
+function stemsLabel(t) {
+  if (t.stems === "queued") return "🎤 waiting to split vocals";
+  if (t.stems === "running") return `🎤 splitting vocals ${Math.round((t.stemProgress || 0) * 100)}%`;
+  if (t.stems === "done") return t.vocals?.length ? "🎤 vocals split" : "🎤 instrumental";
+  if (t.stems === "failed") return "🎤 couldn't split vocals";
+  return null;
 }
 
 // ---- Now Playing ----------------------------------------------------------------------

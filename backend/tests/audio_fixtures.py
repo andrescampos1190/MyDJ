@@ -93,9 +93,39 @@ def groove(bpm: float, first_beat: float = 0.0, secs: float = 60.0, key: str = "
     return y + 0.25 * pad
 
 
-def structured(bpm: float, first_beat: float, key: str, sections) -> np.ndarray:
+def voice(secs: float, bpm: float, seed: int = 5) -> np.ndarray:
+    """A synthetic singer: a quarter-note melody (A minor scale) with glides and vibrato,
+    a glottal-pulse-like source shaped by moving vowel formants, syllables every 8th."""
+    from scipy.signal import lfilter
+
+    vowels = [(730, 1090, 2440), (270, 2290, 3010), (300, 870, 2240), (530, 1840, 2480), (570, 840, 2410)]
+    rng = np.random.default_rng(seed)
+    n = int(secs * SR)
+    t = np.arange(n) / SR
+    beat = 60.0 / bpm
+    scale = [0, 2, 3, 5, 7, 8, 10]
+    notes = np.array(scale, float)[rng.integers(0, len(scale), int(n / (beat * SR)) + 2)]
+    k = int(0.06 * SR)
+    glide = np.convolve(notes[(t / beat).astype(int)], np.ones(k) / k, mode="same")  # portamento
+    f0 = 220 * 2 ** ((glide + 0.4 * np.sin(2 * np.pi * 5.5 * t)) / 12)
+    env = 0.5 + 0.5 * np.clip(np.sin(np.pi * np.mod(t, beat / 2) / (beat / 2)), 0, 1)
+    phase = 2 * np.pi * np.cumsum(f0) / SR
+    src = (sum(np.sin(h * phase) / h for h in range(1, 30)) + 0.05 * rng.normal(0, 1, n)) * env
+    out = np.zeros_like(src)
+    seg = SR // 8
+    pick = rng.integers(0, len(vowels), n // seg + 1)
+    for j, s in enumerate(range(0, n, seg)):
+        chunk = src[s: s + seg]
+        for fc, bw in zip(vowels[pick[j]], (80, 120, 160)):
+            r = np.exp(-np.pi * bw / SR)
+            out[s: s + seg] += lfilter([1 - r], [1, -2 * r * np.cos(2 * np.pi * fc / SR), r * r], chunk)
+    return out / (np.abs(out).max() + 1e-9)
+
+
+def structured(bpm: float, first_beat: float, key: str, sections, vocals=()) -> np.ndarray:
     """A groove arranged in sections, e.g. [("quiet", 8), ("loud", 16), ...] (bars):
-    quiet = intro / break level, loud = drop / chorus, mid = verse."""
+    quiet = intro / break level, loud = drop / chorus, mid = verse. `vocals`: bar ranges
+    [(from, to), ...] with a singer on top."""
     level = {"quiet": 0.12, "mid": 0.45, "loud": 1.0}
     bar = 4 * 60.0 / bpm
     secs = first_beat + sum(n for _, n in sections) * bar
@@ -106,4 +136,10 @@ def structured(bpm: float, first_beat: float, key: str, sections) -> np.ndarray:
     for name, n in sections:
         gain[(t >= at) & (t < at + n * bar)] = level[name]
         at += n * bar
-    return y * gain
+    y = y * gain
+    if vocals:
+        sing = np.zeros(y.size, bool)
+        for a, b in vocals:
+            sing |= (t >= first_beat + a * bar) & (t < first_beat + b * bar)
+        y = y + 0.5 * voice(secs, bpm) * sing
+    return y

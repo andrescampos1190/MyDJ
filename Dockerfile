@@ -18,5 +18,8 @@ COPY backend/ ./
 
 # Render injects $PORT; default to 8000 for a local `docker run -p 8000:8000`.
 ENV PORT=8000
+# Vocal separation needs ~1.5 GB RAM and real CPU — off on small cloud instances.
+# Set MYDJ_STEMS=1 on a machine with the headroom.
+ENV MYDJ_STEMS=0
 EXPOSE 8000
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

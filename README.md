@@ -43,8 +43,8 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
     overlap sits under the incoming intro, not two choruses at once.
   - **Style per pair** (shown in Now Playing, e.g. "8-bar blend into the drop"):
     - **EQ blend** — bass cut on the incoming, **bass swap on a bar line**, outgoing loses
-      mids/highs as it leaves. Vocal genres (reggaeton, hip-hop, pop, Latin…) blend at most
-      4 bars, so two vocals never talk over each other for long.
+      mids/highs as it leaves. Two singers never overlap: with both songs split into stems the
+      **vocals swap on a bar line** (below); otherwise two vocal songs blend at most 4 bars.
     - **Filter sweep** — on a genre change, a big energy jump or a key clash: the incoming comes
       in high-passed and opens up while the outgoing is low-passed away.
     - **Double drop** — two electronic tracks in compatible keys and near-equal tempos: both
@@ -54,6 +54,12 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
     - **Echo out** — tempos >8% apart: tempo-synced echo tail, the incoming drops on the
       downbeat at its own tempo.
     - **Fade** — only when there's no reliable beat grid.
+  - **Vocal stems + vocal swap:** each added song is split into vocals + instrumental in the
+    background (an MDX-Net vocal model run with onnxruntime — ~1 min per song on a laptop CPU;
+    the queue shows "🎤 splitting vocals 40%"). The mixer then knows exactly where each song's
+    vocals are, and the decks play the two stems sample-locked, so mid-blend the outgoing
+    vocal drops out on the bar line where the incoming singer comes in. A song can be played
+    before it's split — until then the mixer goes by its genre.
   - **Intro loop:** a song whose intro is too short to blend over (e.g. 2 bars before the drop)
     gets its intro looped, on the beat, until the drop is due.
   - **Key shift:** when two neighbours' keys clash and a one-semitone move fixes it (+1 semitone
@@ -72,7 +78,9 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
 ## Prerequisites
 Python 3.12+ · ffmpeg + ffprobe on PATH · Node 20.19+ (or 22.12+)
 Python deps: `fastapi`, `uvicorn`, `yt-dlp`, `deno` (the JS runtime yt-dlp needs for
-YouTube), `numpy`, `scipy`, `anthropic` (see `backend/requirements.txt`).
+YouTube), `numpy`, `scipy`, `onnxruntime` (vocal separation), `anthropic` (see
+`backend/requirements.txt`). The vocal model (~65 MB) downloads into `backend/models/` the
+first time a song is split; separating takes ~1.5 GB of RAM while it runs.
 Node deps: `react`, `vite`, `web-audio-beat-detector`, `soundtouchjs` (key-lock),
 `essentia.js` (key detection — AGPL-3.0, fine for local/personal use).
 
@@ -202,7 +210,12 @@ open the link or join:
 - **Beat grid** (`backend/beatgrid.py`): onset envelope → coarse tempo by autocorrelation → fine
   search (0.005 BPM steps) folding the whole song onto each candidate period; downbeat = the beat
   phase with the most harmonic change. No steady beat → no grid (the mixer fades instead).
-- **Engine** (`frontend/src/audioEngine.js`): each deck = source → 3-band EQ → loudness trim →
+- **Stems** (`backend/stems.py`): ffmpeg → 44.1 kHz stereo → STFT chunks (~6 s, crossfaded) through
+  the Kim_Vocal_2 MDX-Net model (onnxruntime) → vocal stem; instrumental = mix − vocals, so the
+  two add back up to the song exactly. Vocal segments = where the vocal stem carries a real share
+  of the sound. Runs in a low-priority child process (`StemJobs`), ordered by the playlist.
+- **Engine** (`frontend/src/audioEngine.js`): each deck = source (or instrumental + vocal stems,
+  the vocals through their own gain) → 3-band EQ → loudness trim →
   volume → crossfade → master (+ an echo send). `mixPlan.js` decides style, phrase timing and the
   drop landing; the engine schedules it on the audio clock and finishes the handoff.
 
@@ -233,10 +246,11 @@ open the link or join:
   steps good ordering produces). Flip **🔒 Key-lock** on for pitch-preserving time-stretch
   (SoundTouch). Key-lock is a **manual-deck** feature — the hands-free auto-mixer forces it off,
   since SoundTouch's main-thread ScriptProcessor isn't suited to an unattended multi-hour set.
-- **Vocal detection:** the mixer doesn't hear vocals. It uses the genre (vocal genres get
-  shorter blends and cut-on-the-one) and the song's structure (quiet intro → room to blend) as a
-  proxy. Simple vocal-energy heuristics weren't reliable on real tracks; a real voice/instrumental
-  model (e.g. Essentia's, or stem separation with Demucs) would do it properly but is heavy.
+- **Vocal separation** runs on the CPU at low priority, one song at a time, in the order the
+  set needs them (~1 min per 3-minute song on a laptop; a busy machine is slower). Songs added
+  right before they play may not be split in time and mix by genre instead. Separation is very
+  good but not perfect: loud backing synths can leak a little into the vocal stem. Set
+  `MYDJ_STEMS=0` to turn it off (e.g. on a low-RAM machine).
 - **Section detection** (chorus/drop boundaries) is loudness-based, refined to the nearest
   downbeat: right for songs whose big parts are louder; a song that's flat all the way through has
   no "drop" to land, and blends instead.
@@ -264,7 +278,8 @@ blueprint for the backend + static frontend.
    - frontend `VITE_API_URL` = `https://<your-backend>.onrender.com` (baked in at build time)
    - backend `ANTHROPIC_API_KEY` (optional, enables AI Polish)
 3. Backend health-check path is `/api/health`. The free tier (512 MB) may OOM on
-   download+ffmpeg+analysis — move to a paid instance if it does.
+   download+ffmpeg+analysis — move to a paid instance if it does. Vocal separation is off in
+   the Docker image (`MYDJ_STEMS=0`); set `MYDJ_STEMS=1` on an instance with 2+ GB RAM.
 4. **YouTube cookies** (needed for YouTube on Render — see below): on `mydj-backend` →
    Environment → **Secret Files**, add `cookies.txt`. The blueprint already points
    `YTDLP_COOKIES_FILE` at `/etc/secrets/cookies.txt`; without the file it's ignored.
@@ -288,5 +303,5 @@ Cookies expire or get rotated; when YouTube loads start failing again, re-export
 > YouTube cookies). Built for personal use; deploy at your own risk.
 
 ## Stretch ideas
-Stem-based transitions (true vocal-aware mixing) · ML-based energy/danceability · drag-to-reorder · save/record the mix ·
+Acapella / instrumental mash-ups from the stems · ML-based energy/danceability · drag-to-reorder · save/record the mix ·
 hot cues (multiple cue points) · Rubberband/Superpowered for higher-quality key-lock.

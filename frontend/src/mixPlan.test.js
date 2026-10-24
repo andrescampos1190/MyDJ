@@ -122,6 +122,56 @@ describe("planTransition", () => {
     expect(p.style).toBe("filter");
   });
 
+  describe("with the vocals known (stems)", () => {
+    // Outgoing: sings until 88 s (its chorus ends at 90.3). Incoming: no drop, vocals
+    // from 8.3 s — 4 bars after its first downbeat.
+    const singer = (over = {}) => song({ vocals: [[10, 88]], stems: true, ...over });
+    const opener = (over = {}) =>
+      song({ bigParts: [], introEnd: 0.3, vocals: [[8.3, 200]], stems: true, ...over });
+
+    it("swaps the vocals on the bar line where the incoming singer comes in", () => {
+      const p = planTransition({ out: singer(), inc: opener(), pos: 30, blendSecs: 16 });
+      expect(p.style).toBe("blend");
+      expect(p.beats).toBe(32); // a swap makes a full-length blend of two vocal songs safe
+      expect(p.outStart).toBeCloseTo(74.3, 6);
+      expect(p.vocalSwap).toBe(16); // incoming at 0.3 + 16 beats = 8.3 s: its first line
+      expect(describePlan(p)).toBe("8-bar blend · vocal swap");
+    });
+
+    it("without stems on the decks, keeps the singers apart by shortening the blend", () => {
+      const p = planTransition({
+        out: singer({ stems: false }),
+        inc: opener({ stems: false }),
+        pos: 30,
+        blendSecs: 16,
+      });
+      expect(p.beats).toBe(16); // ends right as the incoming vocals start
+      expect(p.vocalSwap).toBe(null);
+    });
+
+    it("a song that sings from the first beat: cut without stems, vocal swap with them", () => {
+      const inc = opener({ vocals: [[0.3, 200]] });
+      expect(planTransition({ out: singer({ stems: false }), inc: { ...inc, stems: false }, pos: 30 }).style).toBe(
+        "cut"
+      );
+      const p = planTransition({ out: singer(), inc, pos: 30, blendSecs: 16 });
+      expect(p.style).toBe("blend");
+      expect(p.vocalSwap).toBe(0); // the outgoing vocal is out from the first bar
+    });
+
+    it("trusts the stems over the genre", () => {
+      const inc = song({ genre: "Hip-Hop", bigParts: [], introEnd: 0.3, vocals: [] }); // an instrumental
+      const p = planTransition({ out: song({ genre: "Hip-Hop" }), inc, pos: 30, blendSecs: 16 });
+      expect(p.style).toBe("blend");
+      expect(p.beats).toBe(32);
+    });
+
+    it("no swap when the outgoing singer is already done", () => {
+      const p = planTransition({ out: singer({ vocals: [[10, 60]] }), inc: opener(), pos: 30, blendSecs: 16 });
+      expect(p.vocalSwap).toBe(null);
+    });
+  });
+
   it("double-drops two electronic tracks: drops together, bass swapped on the drop", () => {
     const out = song({ genre: "House", bigParts: [[60.3, 90.3], [140.3, 170.3]] });
     const inc = song({ genre: "House", grid: { bpm: 121, downbeat: 0.3 }, bigParts: [[64.3, 90]] });
@@ -209,5 +259,6 @@ describe("describePlan", () => {
     expect(describePlan({ style: "blend", beats: 32, lands: "drop", loop: {}, keyShift: -1 })).toBe(
       "8-bar blend into the drop (intro looped) · key −1"
     );
+    expect(describePlan({ style: "double", lands: "drop", vocalSwap: 32 })).toBe("Double drop · vocal swap");
   });
 });

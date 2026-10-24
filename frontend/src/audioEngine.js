@@ -107,6 +107,10 @@ class Deck {
     this.filter = ctx.createBiquadFilter();
     this.filter.type = "lowpass";
     this.filter.frequency.value = ctx.sampleRate / 2;
+    // With stems loaded, the vocal stem plays through this gain beside the instrumental
+    // (which goes straight in): 1 = in the mix, 0 = out (a vocal swap).
+    this.vox = ctx.createGain();
+    this.vox.connect(this.eqLow);
     this.eqLow.connect(this.eqMid);
     this.eqMid.connect(this.eqHigh);
     this.eqHigh.connect(this.filter);
@@ -137,7 +141,8 @@ class Deck {
     this.echoHp.connect(this.echoOut);
     this.echoOut.connect(destination);
 
-    this.buffer = null;
+    this.buffer = null; // the song — or, with stems, its instrumental
+    this.vocals = null; // the vocal stem (AudioBuffer), when playing as stems
     this.meta = null; // { title, duration, thumbnail, uploader, bpm, offset }
     this.baseBpm = null; // detected BPM at playbackRate 1
     this.source = null;
@@ -155,9 +160,11 @@ class Deck {
   }
 
   // `keyShift`: the buffer is the track moved this many semitones (to fit the key).
-  load(buffer, meta, keyShift = 0) {
+  // `vocals`: the vocal stem, when `buffer` is the instrumental (they play together).
+  load(buffer, meta, keyShift = 0, vocals = null) {
     this.stop();
     this.buffer = buffer;
+    this.vocals = vocals;
     this.meta = meta;
     this.keyShift = keyShift;
     this.baseBpm = meta?.bpm ?? null;
@@ -201,11 +208,12 @@ class Deck {
     return (this.buffer.duration - this.position()) / this.playbackRate; // real seconds
   }
 
-  _makeSource() {
+  _makeSource(buffer = this.buffer, dest = this.eqLow) {
     const src = this.ctx.createBufferSource();
-    src.buffer = this.buffer;
+    src.buffer = buffer;
     src.playbackRate.value = this.playbackRate;
-    src.connect(this.eqLow);
+    src.connect(dest);
+    if (buffer !== this.buffer) return src; // the vocal stem follows the main source
     src.onended = () => {
       if (src === this.source && this.isPlaying) {
         this.isPlaying = false;
@@ -222,12 +230,17 @@ class Deck {
     if (!this.buffer || this.isPlaying) return;
     const offset = fromOffset != null ? fromOffset : this._startOffset;
     const when = atCtxTime != null ? atCtxTime : this.ctx.currentTime;
-    if (this.engine && this.engine.keyLock) {
+    if (this.engine && this.engine.keyLock && !this.vocals) {
       this._playKeyLock(Math.max(0, offset), when);
     } else {
       const src = this._makeSource();
       src.start(when, Math.max(0, offset));
       this.source = src;
+      if (this.vocals) {
+        // Same start time and offset on the audio clock: the stems stay sample-locked.
+        this._voxSrc = this._makeSource(this.vocals, this.vox);
+        this._voxSrc.start(when, Math.max(0, offset));
+      }
       this._startCtxTime = when;
       this._startOffset = offset;
     }
@@ -241,16 +254,20 @@ class Deck {
     if (!this.buffer || this.isPlaying) return;
     const until = when + (loop.count * loop.len) / this.playbackRate;
     this.play(until, loop.start); // the song itself, after the loop passes
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.buffer;
-    src.loop = true;
-    src.loopStart = loop.start;
-    src.loopEnd = loop.start + loop.len;
-    src.playbackRate.value = this.playbackRate;
-    src.connect(this.eqLow);
-    src.start(when, loop.start);
-    src.stop(until);
-    this._loopSrc = src;
+    this._loopSrcs = [[this.buffer, this.eqLow], ...(this.vocals ? [[this.vocals, this.vox]] : [])].map(
+      ([buffer, dest]) => {
+        const src = this.ctx.createBufferSource();
+        src.buffer = buffer;
+        src.loop = true;
+        src.loopStart = loop.start;
+        src.loopEnd = loop.start + loop.len;
+        src.playbackRate.value = this.playbackRate;
+        src.connect(dest);
+        src.start(when, loop.start);
+        src.stop(until);
+        return src;
+      }
+    );
     this._loop = { when, until, start: loop.start, len: loop.len };
   }
 
@@ -311,15 +328,16 @@ class Deck {
   }
 
   stop() {
-    if (this._loopSrc) {
+    for (const src of [...(this._loopSrcs || []), this._voxSrc]) {
       try {
-        this._loopSrc.stop();
-        this._loopSrc.disconnect();
+        src?.stop();
+        src?.disconnect();
       } catch {
         /* already done */
       }
-      this._loopSrc = null;
     }
+    this._loopSrcs = null;
+    this._voxSrc = null;
     this._loop = null;
     if (this.source) {
       try {
@@ -376,8 +394,9 @@ class Deck {
     const node = band === "low" ? this.eqLow : band === "mid" ? this.eqMid : this.eqHigh;
     setNow(node.gain, db);
   }
-  // All tone controls back to flat: EQ and the sweep filter.
+  // All tone controls back to flat: EQ and the sweep filter (and the vocals back in).
   resetEq() {
+    setNow(this.vox.gain, 1);
     setNow(this.eqLow.gain, 0);
     setNow(this.eqMid.gain, 0);
     setNow(this.eqHigh.gain, 0);
@@ -403,6 +422,7 @@ class Deck {
         this._startOffset = pos;
         this._startCtxTime = this.ctx.currentTime;
         this.source.playbackRate.value = rate;
+        if (this._voxSrc) this._voxSrc.playbackRate.value = rate;
       }
     }
     this.playbackRate = rate;
@@ -436,6 +456,8 @@ export class Engine {
     this._ensure();
     this.auto = new AutoMix(this); // hands-free auto-mixer (defined below)
     this._restoreSession(); // re-hydrate a previous (possibly interrupted) set
+    this._stemOrder = "";
+    setInterval(() => this._pollStems(), 3000); // follow background vocal separation
   }
 
   _ensure() {
@@ -480,7 +502,7 @@ export class Engine {
     try {
       const playlist = this.playlist.map((t) => {
         // eslint-disable-next-line no-unused-vars -- destructured only to strip the un-serializable bits
-        const { buffer, _decoding, ...meta } = t;
+        const { buffer, vocalsBuffer, _decoding, ...meta } = t;
         return meta;
       });
       if (!playlist.length) {
@@ -773,6 +795,8 @@ export class Engine {
         bigParts: t.bigParts ?? null,
         partyMixOut: partyMixOut(t.bigParts, dur, { blend }),
         loudness: t.loudness ?? null, // smoothed dB per second
+        stems: t.stems ?? null, // vocal separation: queued | running | done | ...
+        vocals: t.vocals ?? null, // [[start, end], ...] where the vocals are
       };
     });
   }
@@ -806,40 +830,101 @@ export class Engine {
     });
   }
 
-  // Decode a playlist track's audio on demand (we don't keep ~90 buffers in RAM) —
-  // optionally a copy key-shifted by `shift` semitones (rendered by the backend).
+  // ---- Stems: vocal / instrumental separation (runs on the backend, in the background)
+  // A separated song plays as its two stems (the auto-mixer can then swap vocals).
+  wantsStems(track) {
+    return track?.stems === "done" && !track._noStems;
+  }
+  _stemUrls(track) {
+    return ["inst", "vocals"].map((part) => `${API}/api/stems/${track.id}/${part}`);
+  }
+  // Follow separation progress, and have the backend separate songs in play order.
+  async _pollStems() {
+    const busy = (t) => t.stems === "queued" || t.stems === "running";
+    const from = this.auto.active ? this.auto.idx : 0;
+    const pending = [...this.playlist.slice(from), ...this.playlist.slice(0, from)].filter(busy);
+    if (!pending.length) return;
+    const ids = pending.map((t) => t.id);
+    try {
+      if (ids.join() !== this._stemOrder) {
+        this._stemOrder = ids.join();
+        await apiFetch(`${API}/api/stems/order`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids }),
+        });
+      }
+      const res = await apiFetch(`${API}/api/stems?ids=${ids.join(",")}`);
+      if (!res.ok) return;
+      const status = await res.json();
+      let changed = false;
+      for (const t of pending) {
+        const st = status[t.id];
+        if (!st || (st.status === t.stems && st.progress === t.stemProgress)) continue;
+        t.stems = st.status;
+        t.stemProgress = st.progress ?? 0;
+        if (st.status === "done") t.vocals = st.vocals;
+        changed = true;
+      }
+      if (changed) {
+        this._saveSoon();
+        this.emit();
+      }
+    } catch {
+      /* backend unreachable — try again next round */
+    }
+  }
+
+  // Decode a playlist track's audio on demand (we don't keep ~90 buffers in RAM): its
+  // two stems once it's separated, else the song — optionally key-shifted by `shift`
+  // semitones (rendered by the backend).
   ensureDecoded(track, shift = 0) {
     if (!track) return Promise.resolve(null);
-    if (track.buffer && (track.bufferShift || 0) === shift) return Promise.resolve(track.buffer);
-    if (!track._decoding || track._decodingShift !== shift) {
-      const url = `${API}${track.audioUrl}${shift ? `?semitones=${shift}` : ""}`;
+    const key = `${shift}:${this.wantsStems(track)}`;
+    if (track.buffer && track._decodedKey === key) return Promise.resolve(track.buffer);
+    if (!track._decoding || track._decodingKey !== key) {
+      const q = shift ? `?semitones=${shift}` : "";
+      // client cache first
+      const get = async (url) => this.ctx.decodeAudioData(await fetchAudioBytes(url + q));
       const job = (async () => {
-        const bytes = await fetchAudioBytes(url); // client cache first
-        const buf = await this.ctx.decodeAudioData(bytes);
+        let buf = null;
+        let vocals = null;
+        if (this.wantsStems(track)) {
+          try {
+            [buf, vocals] = await Promise.all(this._stemUrls(track).map(get));
+          } catch {
+            track._noStems = true; // gone (e.g. the backend restarted): play the song itself
+          }
+        }
+        if (!buf) buf = await get(`${API}${track.audioUrl}`);
         if (track._decoding === job) {
           track.buffer = buf;
+          track.vocalsBuffer = vocals;
           track.bufferShift = shift;
+          track._decodedKey = `${shift}:${!!vocals}`;
         }
         return buf;
       })().finally(() => {
         if (track._decoding === job) track._decoding = null;
       });
       track._decoding = job;
-      track._decodingShift = shift;
+      track._decodingKey = key;
     }
     return track._decoding;
   }
   freeDecoded(track) {
     if (track) {
       track.buffer = null;
+      track.vocalsBuffer = null;
       track.bufferShift = 0;
+      track._decodedKey = null;
     }
   }
   removeTrack(id) {
     const t = this.playlist.find((x) => x.id === id);
     if (!t || this.isLocked(id)) return false;
     const ok = this._reorder((list) => list.splice(list.indexOf(t), 1));
-    if (ok) evictAudio(`${API}${t.audioUrl}`);
+    if (ok) for (const url of [`${API}${t.audioUrl}`, ...this._stemUrls(t)]) evictAudio(url);
     return ok;
   }
   clearPlaylist() {
@@ -1105,6 +1190,17 @@ export class Engine {
       front.eqHigh.gain.linearRampToValueAtTime(-6, tE);
       startInc(tS);
     }
+    // Vocal swap (both decks playing stems): the incoming vocal waits, then the singers
+    // hand over in 30 ms, right on the planned bar line.
+    if (plan.vocalSwap != null && plan.beats && front.vocals && inc.vocals) {
+      const X = 0.03;
+      const at = Math.max(now, tS + (plan.vocalSwap / plan.beats) * (tE - tS) - X);
+      inc.vox.gain.setValueAtTime(0, now);
+      inc.vox.gain.setValueAtTime(0, at);
+      inc.vox.gain.linearRampToValueAtTime(1, at + X);
+      front.vox.gain.setValueAtTime(1, at);
+      front.vox.gain.linearRampToValueAtTime(0, at + X);
+    }
     this._visualCrossfade(backId === "B" ? 1 : 0, tS, tE, txn);
     return tE - now;
   }
@@ -1185,6 +1281,13 @@ class AutoMix {
     const back = this.engine.other(this.front);
     const t = this.tracks[this._nextIdx()];
     if (!(t && back.buffer && back.meta && back.meta.id === t.id)) return false;
+    if (!back.vocals && this.engine.wantsStems(t)) {
+      // Its stems arrived after the song was loaded: switch to them — unless the
+      // transition is too close to wait for the decode (then it mixes as it is).
+      const front = this.engine.deck(this.front);
+      const p = this._planFor(t);
+      if (!p || p.outStart - front.position() > 20 * front.playbackRate) return false;
+    }
     // ...in the key the transition calls for (a key-shifted copy, if any).
     return (back.keyShift || 0) === this._keyShiftFor(t);
   }
@@ -1196,10 +1299,11 @@ class AutoMix {
   _loadDeck(deckId, idx, shift = 0) {
     const t = this.tracks[idx];
     if (!t || !t.buffer || (t.bufferShift || 0) !== shift) return false;
+    if (!!t.vocalsBuffer !== this.engine.wantsStems(t)) return false; // stems still decoding
     const deck = this.engine.deck(deckId);
     if (deck.buffer === t.buffer && (deck.keyShift || 0) === shift) return true; // already loaded
     if (deck.isPlaying) return false; // never yank a live deck (throttle-reorder safety)
-    deck.load(t.buffer, t, shift);
+    deck.load(t.buffer, t, shift, t.vocalsBuffer);
     return true;
   }
 
@@ -1381,6 +1485,7 @@ class AutoMix {
   _planFor(next, { now = false } = {}) {
     const front = this.engine.deck(this.front);
     if (!front.buffer || !next || !front.meta) return null;
+    const back = this.engine.other(this.front);
     const gridOf = (t) => t.grid || (t.bpm ? { bpm: t.bpm, downbeat: t.offset || 0 } : null);
     return planTransition({
       out: {
@@ -1388,8 +1493,14 @@ class AutoMix {
         grid: gridOf(front.meta),
         duration: front.buffer.duration,
         keyShift: front.keyShift || 0, // the key the floor actually hears
+        stems: !!front.vocals,
       },
-      inc: { ...next, grid: gridOf(next), duration: next.buffer?.duration || next.duration },
+      inc: {
+        ...next,
+        grid: gridOf(next),
+        duration: next.buffer?.duration || next.duration,
+        stems: back.meta?.id === next.id && !!back.vocals,
+      },
       pos: front.position(),
       rate: front.playbackRate,
       blendSecs: this.transitionSecs,

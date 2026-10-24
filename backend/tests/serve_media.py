@@ -34,6 +34,11 @@ write_audio(os.path.join(root, "drop_a.mp3"),
             structured(124.0, 0.5, "A minor", [("quiet", 8), ("loud", 16), ("quiet", 8), ("loud", 16)]))
 write_audio(os.path.join(root, "drop_b.mp3"),
             structured(125.0, 0.2, "C major", [("quiet", 8), ("loud", 16), ("quiet", 8), ("loud", 16)]))
+# Sung all the way through / singing from bar 2 (for vocal swaps).
+write_audio(os.path.join(root, "vocal_a.mp3"),
+            structured(124.0, 0.5, "A minor", [("loud", 24)], vocals=[(0, 24)]))
+write_audio(os.path.join(root, "vocal_b.mp3"),
+            structured(124.0, 0.3, "C major", [("loud", 24)], vocals=[(2, 24)]))
 
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
 print(f"serving {sorted(os.listdir(root))} on http://127.0.0.1:{port}", flush=True)
