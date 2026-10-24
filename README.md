@@ -112,23 +112,27 @@ runs with `MYDJ_LIVE=1` (it needs internet). GitHub Actions (`.github/workflows/
 all of the above on every push, plus a Docker build check and the live tests.
 
 ## How to use
-1. Paste track URLs into the **Playlist** box → **+ Add** (each is downloaded + analyzed; you'll
-   see its BPM / Camelot key / energy / genre chips). With **🪄 Auto-order** on, each lands in its
-   best spot automatically.
+The screen is laid out for a hands-free set: **Now Playing** on top, the **Queue** below it,
+**Party session** and **Set options** on the side, and **Manual decks** (two decks, crossfader,
+cue points) folded away at the bottom for mixing by hand.
+1. In the Queue, **search a song by name** (top YouTube results → **+ Add**) or **paste a link**.
+   Each song is downloaded and analyzed (tempo, key, energy, loudness, big parts). With
+   **🪄 Auto-order** on, each lands in its best spot automatically.
 2. Optionally **🎚 Order for Party** (full re-sequence with an energy arc) or **✨ AI Polish**. The
-   badges between tracks show each transition's quality (perfect / good / ok / rough, with BPM%,
-   key-match, energy step).
-3. Set the **Blend** length (toggle **🔁 Loop** if you want it to never end — it wraps back to the
-   start) and hit **▶ Start Set**. It plays through, transitioning automatically; **⏹ Stop** ends it
-   and silences both decks cleanly.
+   line between songs shows each transition's quality (perfect / good / ok / rough).
+3. Hit **▶ Start set** (top right). Now Playing shows the song, a waveform with the mix-out point
+   marked, and "Mixing into *next song* in 0:28". **⏭ Mix now** starts the blend early when the
+   floor gets bored; **■ Stop** ends the set and silences both decks cleanly.
 4. During the set, keep adding songs; use **⏭ Next** / **▲▼** / **✕** to steer the queue. **NOW**
    and **NEXT** tags show what's playing and what's mixing in next.
+5. **Set options:** Blend length, 🪄 Auto-order, 🔥 Party mode, 🔊 Volume match, 🔁 Loop, and
+   📋 Copy song data.
 
 ## Party session (friends add songs and vote from their phones)
 1. Start the app as usual (`.\start.ps1`). The backend and frontend now listen on your home
    network too. **The first time, Windows asks whether to allow Python and Node.js through the
    firewall — allow them on Private networks**, or phones can't connect.
-2. In the app, turn on **📱 Party session**. A QR code and a link like
+2. In the app's **📱 Party session** card, click **Start party session**. A QR code and a link like
    `http://192.168.1.23:5173/guest` appear.
 3. Friends on the **same Wi-Fi** scan the code, type their name once, then:
    - **search** for a song by name (top YouTube results) or **paste a link**, and tap **＋ Add** —

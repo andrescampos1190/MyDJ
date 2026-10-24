@@ -601,6 +601,7 @@ export class Engine {
         id: t.id,
         title: t.title,
         uploader: t.uploader ?? null,
+        thumbnail: t.thumbnail ?? null,
         addedBy: t.addedBy ?? null,
         camelot: t.camelot ?? null,
         bpm: t.bpm ?? null,
@@ -609,12 +610,15 @@ export class Engine {
     const a = this.auto;
     const [lo, hi] = this._upcomingRange();
     const upcoming = this.playlist.slice(lo, hi).map(brief);
-    if (!a.active) return { playing: false, now: null, next: null, upcoming };
+    const info = a.nowInfo();
+    if (!info) return { playing: false, now: null, next: null, upcoming };
     return {
       playing: true,
-      now: brief(this.playlist[a.idx]),
-      next: a._hasNext() ? brief(this.playlist[a._nextIdx()]) : null,
+      now: brief(info.track),
+      next: brief(info.next),
       upcoming,
+      // phones animate the progress bar between syncs from this
+      progress: { pos: info.pos, dur: info.dur, mixAt: info.mixAt, mixing: info.transitioning },
     };
   }
 
@@ -1244,6 +1248,15 @@ class AutoMix {
       this._prepareAndLoad(back.id, this._nextIdx()); // decode/replace the next track ahead of time
       return;
     }
+    const mixOutAt = this.mixOutPoint(front);
+
+    if (ended) this._beginTransition(back, 4);
+    else if (front.isPlaying && front.position() >= mixOutAt) this._beginTransition(back, this.transitionSecs);
+  }
+
+  // Seconds into the front track at which the blend into the next one starts.
+  mixOutPoint(front = this.engine.deck(this.front)) {
+    if (!front.buffer) return null;
     const dur = front.buffer.duration;
 
     // Mix OUT at the detected outro, but early enough that the blend finishes before
@@ -1268,9 +1281,30 @@ class AutoMix {
       const p = partyMixOut(front.meta?.bigParts, dur, { blend: this.transitionSecs });
       if (p != null && p < mixOutAt) mixOutAt = p;
     }
+    return mixOutAt;
+  }
 
-    if (ended) this._beginTransition(back, 4);
-    else if (front.isPlaying && front.position() >= mixOutAt) this._beginTransition(back, this.transitionSecs);
+  // The DJ's override: start blending into the next track now (it still lands on a bar).
+  mixNow() {
+    if (!this.active || this._transitioning || !this._backReady()) return false;
+    this._beginTransition(this.engine.other(this.front), this.transitionSecs);
+    return true;
+  }
+
+  // What's playing, for the Now Playing view and friends' phones.
+  nowInfo() {
+    if (!this.active) return null;
+    const front = this.engine.deck(this.front);
+    const track = this.tracks[this.idx] || null;
+    return {
+      track,
+      next: this._hasNext() ? this.tracks[this._nextIdx()] : null,
+      pos: front.position(),
+      dur: front.buffer?.duration || track?.duration || 0,
+      mixAt: this.mixOutPoint(front),
+      transitioning: this._transitioning,
+      canMixNow: !this._transitioning && this._backReady(),
+    };
   }
 
   _beginTransition(back, secs) {

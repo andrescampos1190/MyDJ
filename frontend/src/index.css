@@ -13,6 +13,9 @@
   --danger-bg: #381c21;
   --danger-border: #6b2b34;
   --danger-text: #ffb3bd;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --radius: 16px;
 
   color-scheme: dark;
 }
@@ -34,9 +37,14 @@ body {
 }
 
 #root {
-  max-width: 880px;
+  max-width: 1240px;
   margin: 0 auto;
-  padding: 40px 20px 80px;
+  padding: 20px 20px 60px;
+}
+@media (max-width: 600px) {
+  #root {
+    padding: 12px 12px 40px;
+  }
 }
 
 a {
