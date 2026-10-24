@@ -193,7 +193,7 @@ function Crossfader({ engine }) {
 // Party session: friends on the same Wi-Fi scan the code to add songs and vote.
 function PartyPanel({ party }) {
   const urls = party.on ? party.joinUrls() : [];
-  const url = urls[0];
+  const url = urls[party.selected];
   const [qr, setQr] = useState({ url: "", src: "" });
   useEffect(() => {
     if (!url) return;
@@ -203,6 +203,7 @@ function PartyPanel({ party }) {
       alive = false;
     };
   }, [url]);
+  const c = party.check;
   return (
     <div className="party">
       <div className="party-head">
@@ -218,24 +219,106 @@ function PartyPanel({ party }) {
       {party.on && url && (
         <div className="party-join">
           {qr.url === url && <img src={qr.src} alt="QR code to join the party" />}
-          <div>
+          <div className="party-info">
             <div>Scan with a phone camera, or open:</div>
             <div className="party-url">{url}</div>
-            {urls.slice(1).map((u) => (
-              <div key={u} className="muted">
-                or {u}
+            {urls.length > 1 && (
+              <div className="party-alt">
+                <span className="muted">Phones can't open it? Try another address:</span>
+                {urls.map((u, i) =>
+                  i === party.selected ? null : (
+                    <button key={u} className="ghost sm" onClick={() => party.select(i)}>
+                      {party.addresses[i]}
+                    </button>
+                  )
+                )}
               </div>
-            ))}
-            <div className="muted">Phones must be on the same Wi-Fi as this computer.</div>
+            )}
+            <ul className="party-status">
+              <Status
+                state={c ? (c.backend ? "ok" : "bad") : "wait"}
+                text={
+                  !c
+                    ? "Checking the music server is reachable on your network…"
+                    : c.backend
+                      ? "Music server reachable on your network"
+                      : "Music server only answers on this computer — close MyDJ and start it with .\\start.ps1"
+                }
+              />
+              <Status
+                state={c ? (c.app ? "ok" : "bad") : "wait"}
+                text={
+                  !c
+                    ? "Checking the app is reachable on your network…"
+                    : c.app
+                      ? "App reachable on your network"
+                      : "App only answers on this computer — restart it with .\\start.ps1"
+                }
+              />
+              <Status
+                state={party.guests.length ? "ok" : "wait"}
+                text={
+                  party.guests.length
+                    ? `${party.guests.length} phone${party.guests.length > 1 ? "s" : ""} connected: ${party.guests.join(", ")}`
+                    : "No phones connected yet — scan the code with one to test"
+                }
+              />
+              {(party.working > 0 || party.adding > 0) && (
+                <Status
+                  state="wait"
+                  text={`${party.working + party.adding} song${party.working + party.adding > 1 ? "s" : ""} from friends on the way…`}
+                />
+              )}
+            </ul>
           </div>
         </div>
       )}
-      {party.on && !url && !party.error && (
+      {party.on && !party.loaded && !party.error && (
         <div className="muted">Looking up this computer's network address…</div>
       )}
-      {party.adding > 0 && <div className="muted">Adding a song from a friend…</div>}
+      {party.on && party.loaded && party.addresses.length === 0 && (
+        <div className="error">
+          This computer doesn't seem to be on a network. Connect it to your Wi-Fi and turn the party
+          session off and on again.
+        </div>
+      )}
       {party.error && <div className="error">{party.error}</div>}
+      {party.on && (
+        <details className="party-help">
+          <summary>Phones can't connect?</summary>
+          <ol>
+            <li>
+              The phone must be on the <b>same Wi-Fi</b> as this computer — not mobile data, and not
+              a "guest" Wi-Fi (those usually block devices from seeing each other).
+            </li>
+            <li>
+              <b>Windows Firewall:</b> Start → "Allow an app through Windows Firewall" → Change
+              settings → tick <b>Private</b> for <b>Node.js JavaScript Runtime</b> and{" "}
+              <b>Python</b>. (Or accept the prompt Windows shows the first time you run
+              start.ps1.)
+            </li>
+            <li>
+              Your Wi-Fi must be a <b>Private</b> network: Settings → Network &amp; internet → Wi-Fi →
+              your network → Network profile type → Private.
+            </li>
+            <li>Turn off any VPN on this computer or the phone.</li>
+            <li>If you have more than one address listed above, try the others.</li>
+          </ol>
+          <div className="muted">
+            Once a phone shows up under "phones connected", everything is working.
+          </div>
+        </details>
+      )}
     </div>
+  );
+}
+
+function Status({ state, text }) {
+  const icon = { ok: "✅", bad: "❌", wait: "⏳" }[state];
+  return (
+    <li className={`st-${state}`}>
+      <span>{icon}</span> {text}
+    </li>
   );
 }
 

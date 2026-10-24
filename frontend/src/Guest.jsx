@@ -7,7 +7,7 @@ import "./Guest.css";
 
 const NAME_KEY = "mydj-guest-name";
 const VOTER_KEY = "mydj-voter";
-const POLL_MS = 2500;
+const POLL_MS = 1500;
 
 function load(key) {
   try {
@@ -34,12 +34,15 @@ function voterId() {
   return v;
 }
 
-async function api(path, opts) {
+// The request never reached the music server (vs. the server answering with an error).
+class Unreachable extends Error {}
+
+async function api(path, { timeout = 8000, ...opts } = {}) {
   let res;
   try {
-    res = await fetch(`${API}${path}`, opts);
+    res = await fetch(`${API}${path}`, { ...opts, signal: AbortSignal.timeout(timeout) });
   } catch {
-    throw new Error("Can't reach the DJ's computer — same Wi-Fi?");
+    throw new Unreachable("Can't reach the DJ's computer");
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || `Something went wrong (${res.status})`);
@@ -92,14 +95,21 @@ function Join({ onJoin }) {
 
 function Party({ name, voter, onRename }) {
   const [queue, setQueue] = useState(null);
-  const [offline, setOffline] = useState("");
+  // connecting -> ok, or unreachable (never got through) / lost (got through before)
+  const [conn, setConn] = useState("connecting");
+  const [notice, setNotice] = useState("");
 
   async function refresh() {
     try {
-      setQueue(await api(`/api/party/queue?voter=${encodeURIComponent(voter)}`));
-      setOffline("");
+      const q = await api(
+        `/api/party/queue?voter=${encodeURIComponent(voter)}&name=${encodeURIComponent(name)}`,
+        { timeout: 5000 }
+      );
+      setQueue(q);
+      setConn("ok");
     } catch (e) {
-      setOffline(e.message);
+      if (e instanceof Unreachable) setConn((c) => (c === "ok" || c === "lost" ? "lost" : "unreachable"));
+      else setNotice(e.message);
     }
   }
   useEffect(() => {
@@ -122,8 +132,9 @@ function Party({ name, voter, onRename }) {
     }));
     try {
       await post("/api/party/vote", { trackId: track.id, voter, value: next });
+      setNotice("");
     } catch (e) {
-      setOffline(e.message);
+      setNotice(`Your vote didn't go through: ${e.message}`);
     }
     refresh();
   }
@@ -136,31 +147,66 @@ function Party({ name, voter, onRename }) {
           👤 {name}
         </button>
       </header>
-      <AddSong name={name} onAdded={refresh} />
-      {offline && <div className="g-error">{offline}</div>}
-      {queue && !queue.hostOnline && (
-        <div className="g-note">Waiting for the DJ to start the party session…</div>
-      )}
+      <ConnectionBar conn={conn} queue={queue} />
+      <AddSong name={name} voter={voter} onSent={refresh} />
+      {notice && <div className="g-error">{notice}</div>}
       {queue && <Queue queue={queue} onVote={vote} />}
     </div>
   );
 }
 
-function AddSong({ name, onAdded }) {
+// Always-visible answer to "is this working?".
+function ConnectionBar({ conn, queue }) {
+  let tone = "wait";
+  let title = "Connecting to the DJ's computer…";
+  let detail = "";
+  if (conn === "unreachable") {
+    tone = "bad";
+    title = "Can't reach the DJ's music server";
+    detail =
+      "This page came from the DJ's computer, so your Wi-Fi is right. On the DJ's computer: " +
+      "allow Python through Windows Firewall (Private networks), or restart MyDJ with start.ps1. " +
+      "Retrying…";
+  } else if (conn === "lost") {
+    tone = "bad";
+    title = "Lost connection to the DJ — retrying…";
+    detail = "Make sure you're still on the same Wi-Fi as the DJ (not mobile data).";
+  } else if (conn === "ok" && queue && !queue.hostOnline) {
+    tone = "warn";
+    title = "Connected, but the DJ's party session is off";
+    detail = "You can still add songs — they'll join the queue when it's back on.";
+  } else if (conn === "ok" && queue) {
+    tone = "ok";
+    const n = queue.guests?.length || 1;
+    title = "Connected to the DJ";
+    detail = n > 1 ? `${n} phones here` : "You're the first one here";
+  }
+  return (
+    <div className={`g-conn ${tone}`} role="status">
+      <span className="dot" />
+      <div>
+        <div className="g-conn-title">{title}</div>
+        {detail && <div className="g-conn-detail">{detail}</div>}
+      </div>
+    </div>
+  );
+}
+
+function AddSong({ name, voter, onSent }) {
   const [text, setText] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
-  const [status, setStatus] = useState({}); // url -> "adding" | "added" | error message
+  const [sent, setSent] = useState({}); // url -> "sending" | "sent" | error message
   const [error, setError] = useState("");
 
-  async function request(url) {
-    setStatus((s) => ({ ...s, [url]: "adding" }));
+  async function request(url, title) {
+    setSent((s) => ({ ...s, [url]: "sending" }));
     try {
-      await post("/api/party/request", { url, name });
-      setStatus((s) => ({ ...s, [url]: "added" }));
-      onAdded();
+      await post("/api/party/request", { url, name, voter, title: title || "" });
+      setSent((s) => ({ ...s, [url]: "sent" }));
+      onSent();
     } catch (e) {
-      setStatus((s) => ({ ...s, [url]: e.message }));
+      setSent((s) => ({ ...s, [url]: e.message }));
     }
   }
 
@@ -177,7 +223,11 @@ function AddSong({ name, onAdded }) {
     }
     setSearching(true);
     try {
-      setResults((await api(`/api/search?q=${encodeURIComponent(q)}`)).results);
+      const { results: found } = await api(`/api/search?q=${encodeURIComponent(q)}`, {
+        timeout: 20000,
+      });
+      setResults(found);
+      if (!found.length) setError("No results — try other words, or paste a link.");
     } catch (e2) {
       setError(e2.message);
     } finally {
@@ -195,14 +245,15 @@ function AddSong({ name, onAdded }) {
           enterKeyHint="search"
         />
         <button className="g-btn primary" disabled={!text.trim() || searching}>
-          {searching ? "…" : "Search"}
+          {searching ? "Searching…" : "Search"}
         </button>
       </form>
       {error && <div className="g-error">{error}</div>}
       {results.length > 0 && (
         <ul className="g-results">
           {results.map((r) => {
-            const st = status[r.url];
+            const st = sent[r.url];
+            const failed = st && st !== "sending" && st !== "sent";
             return (
               <li key={r.url}>
                 {r.thumbnail && <img src={r.thumbnail} alt="" />}
@@ -211,14 +262,14 @@ function AddSong({ name, onAdded }) {
                   <div className="g-sub">
                     {[r.channel, fmtDur(r.duration)].filter(Boolean).join(" · ")}
                   </div>
-                  {st && st !== "adding" && st !== "added" && <div className="g-error">{st}</div>}
+                  {failed && <div className="g-error">{st}</div>}
                 </div>
                 <button
                   className="g-btn"
-                  onClick={() => request(r.url)}
-                  disabled={st === "adding" || st === "added"}
+                  onClick={() => request(r.url, r.title === r.url ? "" : r.title)}
+                  disabled={st === "sending" || st === "sent"}
                 >
-                  {st === "adding" ? "Adding…" : st === "added" ? "Added ✓" : "＋ Add"}
+                  {st === "sending" ? "Sending…" : st === "sent" ? "Requested ✓" : "＋ Add"}
                 </button>
               </li>
             );
@@ -235,16 +286,24 @@ function Queue({ queue, onVote }) {
     <section className="g-queue">
       {now && <Song label="NOW PLAYING" t={now} />}
       {next && <Song label="UP NEXT" t={next} />}
-      <h2>Queue {upcoming.length > 0 && `· ${upcoming.length}`}</h2>
-      {pending.map((p, i) => (
-        <div key={`p${i}`} className="g-song pending">
+      {pending.length > 0 && <h2>On the way</h2>}
+      {pending.map((p) => (
+        <div key={p.rid} className={`g-song pending ${p.status}`}>
           <div className="g-main">
-            <div className="g-title">{p.title}</div>
-            <div className="g-sub">👤 {p.addedBy} · getting it ready…</div>
+            <div className="g-title">{p.title || "A pasted link"}</div>
+            <div className="g-sub">
+              👤 {p.addedBy} ·{" "}
+              {p.status === "downloading"
+                ? "⏳ downloading & analyzing (usually 10–30 s)"
+                : p.status === "ready"
+                  ? "✓ ready — joining the queue…"
+                  : `⚠ couldn't add: ${p.error}`}
+            </div>
           </div>
         </div>
       ))}
-      {upcoming.length === 0 && pending.length === 0 && (
+      <h2>Queue {upcoming.length > 0 && `· ${upcoming.length}`}</h2>
+      {upcoming.length === 0 && (
         <div className="g-note">Nothing queued yet — add a song!</div>
       )}
       {upcoming.map((t) => (
@@ -253,7 +312,6 @@ function Queue({ queue, onVote }) {
     </section>
   );
 }
-
 function Song({ t, label, onVote }) {
   return (
     <div className={`g-song ${label ? "featured" : ""}`}>

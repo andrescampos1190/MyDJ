@@ -23,7 +23,8 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `"${python}" -m uvicorn main:app --app-dir ../backend --port ${API_PORT}`,
+      // --host 0.0.0.0 like start.ps1, so the party panel's network self-check passes.
+      command: `"${python}" -m uvicorn main:app --app-dir ../backend --host 0.0.0.0 --port ${API_PORT}`,
       url: `http://127.0.0.1:${API_PORT}/api/health`,
       env: {
         ALLOWED_ORIGINS: `http://localhost:${WEB_PORT}`,
