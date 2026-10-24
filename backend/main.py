@@ -25,6 +25,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 
 from analyzer import analyze
 from downloader import DOWNLOAD_DIR, download, get_info, search
+from keyshift import shifted
 from llm_order import order_tracks
 from party import Party, lan_addresses
 
@@ -255,13 +256,21 @@ def _load_track(url: str) -> dict:
 
 
 @app.get("/api/audio/{track_id}")
-def audio(track_id: str):
-    """Serve a loaded track inline for the browser to decode into an AudioBuffer."""
+def audio(track_id: str, semitones: int = 0):
+    """Serve a loaded track inline for the browser to decode into an AudioBuffer —
+    optionally key-shifted by a semitone or two (same tempo) to fix a key clash."""
     if not ID_RE.match(track_id):
         raise HTTPException(status_code=404, detail="Not found")
     path = os.path.join(DOWNLOAD_DIR, f"{track_id}.mp3")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Track not loaded (reload it)")
+    if semitones:
+        if semitones not in (-2, -1, 1, 2):
+            raise HTTPException(status_code=400, detail="Key shifts are limited to ±2 semitones")
+        try:
+            path = shifted(path, semitones)
+        except Exception:
+            raise HTTPException(status_code=500, detail="Key shift failed")
     return FileResponse(path, media_type="audio/mpeg")
 
 

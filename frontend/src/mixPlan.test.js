@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describePlan, planTransition } from "./mixPlan";
+import { describePlan, planTransition, shiftCamelot } from "./mixPlan";
 
 // A song on a 120 BPM grid (beat 0.5 s, bar 2 s) with its first downbeat at 0.3 s.
 const song = (over = {}) => ({
@@ -63,11 +63,78 @@ describe("planTransition", () => {
     expect(whole.lands).toBe("start");
   });
 
-  it("keeps a key clash short", () => {
+  it("keeps a clash it can't fix short, under a filter sweep", () => {
     const p = planTransition({ out: song(), inc: song({ camelot: "2B" }), pos: 30 });
-    expect(p.style).toBe("short");
+    expect(p.style).toBe("filter");
+    expect(p.keyShift).toBe(0);
     expect(p.beats).toBe(8);
     expect(p.swapBeat).toBe(4);
+  });
+
+  it("key-shifts a clash that's a semitone from fitting", () => {
+    // 8A -> 2A clashes; 2A a semitone down (7A) or up (9A) sits right next to 8A.
+    const p = planTransition({ out: song(), inc: song({ camelot: "2A" }), pos: 30 });
+    expect(Math.abs(p.keyShift)).toBe(1);
+    expect(p.style).toBe("blend");
+    expect(p.beats).toBe(32);
+    // ...and a key-shifted outgoing song is matched on the key it's heard in.
+    const q = planTransition({ out: song({ camelot: "2A", keyShift: 1 }), inc: song(), pos: 30 });
+    expect(q.keyShift).toBe(0);
+  });
+
+  it("treats a semitone up (+7 on the wheel) as an energy boost, not a clash", () => {
+    const p = planTransition({ out: song(), inc: song({ camelot: "3A" }), pos: 30 });
+    expect(p.keyShift).toBe(0);
+    expect(p.style).toBe("blend");
+  });
+
+  it("loops a short quiet intro so the drop still lands on the one", () => {
+    // Drop 2 bars in, after a quiet 2-bar intro: loop those bars for a 32-beat blend.
+    const inc = song({ bigParts: [[4.3, 40]], introEnd: 4.3 });
+    const p = planTransition({ out: song(), inc, pos: 30 });
+    expect(p.lands).toBe("drop");
+    expect(p.loop).toEqual({ start: 0.3, len: 4, count: 3 });
+    expect(p.inStart).toBeCloseTo(0.3, 6);
+    expect(p.beats).toBe(32); // 2 bars of intro + 3 looped 2-bar passes
+  });
+
+  it("cuts on the one into a vocal song that opens loud with no drop to aim for", () => {
+    const out = song({ genre: "Reggaeton" });
+    const inc = song({ genre: "Reggaeton", bigParts: [], introEnd: 0.3 });
+    const p = planTransition({ out, inc, pos: 30 });
+    expect(p.style).toBe("cut");
+    expect(p.outEnd).toBeCloseTo(90.3, 6); // still leaves as the chorus ends, on a downbeat
+    expect(p.outEnd - p.outStart).toBeCloseTo(0.5, 6); // the last beat echoes
+    expect(p.echo).toEqual({ delayBeats: 0.5, feedback: 0.35 });
+    expect(p.incRate).toBe(1);
+  });
+
+  it("caps the overlap of two vocal-led songs at 4 bars", () => {
+    const out = song({ genre: "Pop" });
+    const inc = song({ genre: "Reggaeton", bigParts: [[30.3, 60]] });
+    const p = planTransition({ out, inc, pos: 30, blendSecs: 16 });
+    expect(p.beats).toBe(16);
+    expect(p.style).toBe("filter"); // a genre change gets the filter sweep
+  });
+
+  it("filter-sweeps across a big energy jump", () => {
+    const p = planTransition({ out: song({ energy: 2 }), inc: song({ energy: 8 }), pos: 30 });
+    expect(p.style).toBe("filter");
+  });
+
+  it("double-drops two electronic tracks: drops together, bass swapped on the drop", () => {
+    const out = song({ genre: "House", bigParts: [[60.3, 90.3], [140.3, 170.3]] });
+    const inc = song({ genre: "House", grid: { bpm: 121, downbeat: 0.3 }, bigParts: [[64.3, 90]] });
+    const p = planTransition({ out, inc, pos: 30 });
+    expect(p.style).toBe("double");
+    expect(p.swapBeat).toBe(32);
+    const drop = p.outStart + p.swapBeat * 0.5; // outgoing beat = 0.5 s
+    expect(drop).toBeCloseTo(60.3, 6); // the outgoing drop...
+    // ...meets the incoming drop, snapped to the incoming song's own downbeat
+    const incBar = (4 * 60) / 121;
+    const incDrop = p.inStart + 32 * (60 / 121);
+    expect(incDrop).toBeCloseTo(0.3 + Math.round((64.3 - 0.3) / incBar) * incBar, 6);
+    expect(p.outEnd - drop).toBeCloseTo(8, 6); // outgoing gone 4 bars after the drop
   });
 
   it("echoes out when the tempos are too far apart to beat-match", () => {
@@ -120,11 +187,27 @@ describe("planTransition", () => {
   });
 });
 
+describe("shiftCamelot", () => {
+  it("moves 7 steps round the wheel per semitone", () => {
+    expect(shiftCamelot("8A", 1)).toBe("3A");
+    expect(shiftCamelot("8A", -1)).toBe("1A");
+    expect(shiftCamelot("12B", 1)).toBe("7B");
+    expect(shiftCamelot("8A", 0)).toBe("8A");
+    expect(shiftCamelot(null, 1)).toBe(null);
+  });
+});
+
 describe("describePlan", () => {
   it("says what kind of transition is coming", () => {
     expect(describePlan({ style: "blend", beats: 32, lands: "drop" })).toBe("8-bar blend into the drop");
     expect(describePlan({ style: "short", beats: 8, lands: "start" })).toBe("2-bar quick blend");
     expect(describePlan({ style: "echo", lands: "drop" })).toBe("Echo out into the drop");
     expect(describePlan({ style: "fade" })).toBe("Fade");
+    expect(describePlan({ style: "double", lands: "drop" })).toBe("Double drop");
+    expect(describePlan({ style: "cut" })).toBe("Cut on the one");
+    expect(describePlan({ style: "filter", beats: 16, lands: "start" })).toBe("4-bar filter sweep");
+    expect(describePlan({ style: "blend", beats: 32, lands: "drop", loop: {}, keyShift: -1 })).toBe(
+      "8-bar blend into the drop (intro looped) · key −1"
+    );
   });
 });

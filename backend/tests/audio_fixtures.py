@@ -16,6 +16,9 @@ PROGRESSIONS = {
     "A minor": [(A3, C4, E4), (D4, F4, 2 * A3), (E4, G4, 2 * B3), (A3, C4, E4)],
     "C major": [(C4, E4, G4), (F4, 2 * A3, 2 * C4), (G3, B3, D4), (C4, E4, G4)],
     "G major": [(G3, B3, D4), (C4, E4, G4), (D4, FS4, 2 * A3), (G3, B3, D4)],
+    # Eb minor (Camelot 2A): clashes with A minor (8A), a semitone from D/E minor.
+    "Eb minor": [(311.13, 369.99, 466.16), (207.65, 246.94, 311.13), (233.08, 277.18, 349.23),
+                 (311.13, 369.99, 466.16)],
 }
 
 
@@ -88,3 +91,19 @@ def groove(bpm: float, first_beat: float = 0.0, secs: float = 60.0, key: str = "
         m = on & (np.mod(bar_n, len(chords)) == i)
         pad[m] = sum(_tone(f, t[m]) for f in chord) / len(chord)
     return y + 0.25 * pad
+
+
+def structured(bpm: float, first_beat: float, key: str, sections) -> np.ndarray:
+    """A groove arranged in sections, e.g. [("quiet", 8), ("loud", 16), ...] (bars):
+    quiet = intro / break level, loud = drop / chorus, mid = verse."""
+    level = {"quiet": 0.12, "mid": 0.45, "loud": 1.0}
+    bar = 4 * 60.0 / bpm
+    secs = first_beat + sum(n for _, n in sections) * bar
+    y = groove(bpm, first_beat, secs, key)
+    t = np.arange(y.size) / SR
+    gain = np.full(y.size, level[sections[0][0]])
+    at = first_beat
+    for name, n in sections:
+        gain[(t >= at) & (t < at + n * bar)] = level[name]
+        at += n * bar
+    return y * gain

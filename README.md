@@ -41,10 +41,25 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
     downbeats; the outgoing song leaves as its chorus ends (Party mode) or across its outro, and
     the incoming song is timed so **its drop lands exactly when the old one is gone** — the
     overlap sits under the incoming intro, not two choruses at once.
-  - **Style per pair:** long EQ blend (bass cut on the incoming, **bass swap on a bar line**,
-    outgoing loses mids/highs as it leaves); a 2-bar quick blend on a key clash; an **echo-out**
-    (tempo-synced echo tail, incoming drops on the downbeat at its own tempo) when tempos are
-    >8% apart; a plain fade only when there's no reliable beat grid.
+  - **Style per pair** (shown in Now Playing, e.g. "8-bar blend into the drop"):
+    - **EQ blend** — bass cut on the incoming, **bass swap on a bar line**, outgoing loses
+      mids/highs as it leaves. Vocal genres (reggaeton, hip-hop, pop, Latin…) blend at most
+      4 bars, so two vocals never talk over each other for long.
+    - **Filter sweep** — on a genre change, a big energy jump or a key clash: the incoming comes
+      in high-passed and opens up while the outgoing is low-passed away.
+    - **Double drop** — two electronic tracks in compatible keys and near-equal tempos: both
+      drops hit on the same downbeat, then the old track leaves 4 bars later.
+    - **Cut on the one** — a vocal track with no intro to blend over: the outgoing's last beat
+      feeds a short echo and the new song slams in on the downbeat.
+    - **Echo out** — tempos >8% apart: tempo-synced echo tail, the incoming drops on the
+      downbeat at its own tempo.
+    - **Fade** — only when there's no reliable beat grid.
+  - **Intro loop:** a song whose intro is too short to blend over (e.g. 2 bars before the drop)
+    gets its intro looped, on the beat, until the drop is due.
+  - **Key shift:** when two neighbours' keys clash and a one-semitone move fixes it (+1 semitone
+    = +7 on the Camelot wheel), the incoming song is pitched ±1 semitone — the backend renders the
+    copy with ffmpeg's Rubber Band filter (formants preserved), so the tempo and beat grid don't
+    move. Without Rubber Band in your ffmpeg build it falls back to a plain resample.
   - **Sample-accurate:** fades, EQ moves, echo and bass swap are scheduled on the audio clock,
     not JS timers — they land on the beat even in a busy or background tab.
   - **Tempo glides back:** after a beat-matched handoff the new song returns to its own tempo
@@ -116,7 +131,8 @@ cd backend && venv/bin/python -m pytest          # Windows: venv\Scripts\python.
 npm run lint --prefix frontend && npm test --prefix frontend
 
 # browser end-to-end: starts backend + frontend + a local media server, adds tracks,
-# orders them, starts a set, and checks audio plays and auto-transitions to track 2
+# orders them, starts a set, and checks audio plays and auto-transitions to track 2 — plus
+# each transition style (beat alignment measured against the test songs' true grids)
 cd frontend && npx playwright install chromium && npm run test:e2e
 ```
 Real YouTube/SoundCloud downloads are covered by `backend/tests/test_live.py`, which only
@@ -217,6 +233,13 @@ open the link or join:
   steps good ordering produces). Flip **🔒 Key-lock** on for pitch-preserving time-stretch
   (SoundTouch). Key-lock is a **manual-deck** feature — the hands-free auto-mixer forces it off,
   since SoundTouch's main-thread ScriptProcessor isn't suited to an unattended multi-hour set.
+- **Vocal detection:** the mixer doesn't hear vocals. It uses the genre (vocal genres get
+  shorter blends and cut-on-the-one) and the song's structure (quiet intro → room to blend) as a
+  proxy. Simple vocal-energy heuristics weren't reliable on real tracks; a real voice/instrumental
+  model (e.g. Essentia's, or stem separation with Demucs) would do it properly but is heavy.
+- **Section detection** (chorus/drop boundaries) is loudness-based, refined to the nearest
+  downbeat: right for songs whose big parts are louder; a song that's flat all the way through has
+  no "drop" to land, and blends instead.
 - **Phrasing assumes 4/4 on a steady grid** — right for pop, reggaeton, hip-hop and electronic;
   live or free-time recordings get no grid and fall back to a fade.
 - **Background tabs:** audio keeps playing, but browsers throttle JS timers, so a *smooth* blend
@@ -265,5 +288,5 @@ Cookies expire or get rotated; when YouTube loads start failing again, re-export
 > YouTube cookies). Built for personal use; deploy at your own risk.
 
 ## Stretch ideas
-Stem-based transitions · ML-based energy/danceability · drag-to-reorder · save/record the mix ·
+Stem-based transitions (true vocal-aware mixing) · ML-based energy/danceability · drag-to-reorder · save/record the mix ·
 hot cues (multiple cue points) · Rubberband/Superpowered for higher-quality key-lock.

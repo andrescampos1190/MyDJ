@@ -200,6 +200,47 @@ def _sections(y: np.ndarray) -> dict:
     return {"loudness": loudness, "bigParts": big}
 
 
+def _refine_parts(y: np.ndarray, parts: list, grid: dict | None) -> list:
+    """Sharpen big-part boundaries: the 7 s smoothing that finds sections blurs their
+    edges by seconds, but landing a drop on the one needs the bar. Each edge moves to the
+    strongest loudness step within +-4 s (2 s after vs 2 s before), then snaps to the
+    nearest downbeat."""
+    hop = SR // 20  # 50 ms frames
+    n = y.size // hop
+    if n < 200 or not parts:
+        return parts
+    db = 20 * np.log10(np.sqrt(np.mean(y[: n * hop].reshape(n, hop) ** 2, axis=1)) + 1e-9)
+    c = np.r_[0.0, np.cumsum(db)]
+    w = 40  # 2 s
+    idx = np.arange(w, n - w)
+    step = np.zeros(n)
+    step[idx] = (c[idx + w] - c[idx]) / w - (c[idx] - c[idx - w]) / w  # after - before
+    dur = y.size / SR
+
+    def edge(t, rising):
+        if t <= 0.5 or t >= dur - 0.5:
+            return t
+        i0, i1 = max(w, int((t - 4) * 20)), min(n - w, int((t + 4) * 20))
+        if i1 <= i0:
+            return t
+        seg = step[i0:i1]
+        i = i0 + int(np.argmax(seg) if rising else np.argmin(seg))
+        return i / 20
+
+    def snap(t):
+        if not grid or t <= 0.5 or t >= dur - 0.5:
+            return t
+        bar = 4 * 60.0 / grid["bpm"]
+        return grid["downbeat"] + round((t - grid["downbeat"]) / bar) * bar
+
+    out = []
+    for a, b in parts:
+        a2, b2 = snap(edge(a, True)), snap(edge(b, False))
+        if b2 - a2 >= 4:
+            out.append([round(float(a2), 2), round(float(b2), 2)])
+    return out
+
+
 def analyze(path: str) -> dict:
     """Return {key, camelot, energy, introEnd, outroStart, energyCurve, lufs, bigParts,
     loudness, grid}. Never raises."""
@@ -220,7 +261,9 @@ def analyze(path: str) -> dict:
             grid = beat_grid(y, SR)
         except Exception:
             grid = None
+        sections = _sections(y)
+        sections["bigParts"] = _refine_parts(y, sections["bigParts"], grid)
         return {"key": name, "camelot": camelot, "energy": _energy(ymid), **structure,
-                **_sections(y), "lufs": _lufs(path), "grid": grid}
+                **sections, "lufs": _lufs(path), "grid": grid}
     except Exception:
         return nulls

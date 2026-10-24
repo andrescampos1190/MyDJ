@@ -142,12 +142,12 @@ test("party mode mixes out after the big chorus, not at the end", async ({ page 
     const e = window.engine;
     return [e.deckA, e.deckB].find((d) => d.meta?.title === "party_song").position();
   });
-  // Detected big part ~23-72 s: the transition finishes as the chorus ends (on a
-  // downbeat), instead of mixing out at ~104 s by playing the song to its end.
+  // The transition finishes as the chorus ends at 75 s (on a downbeat), instead of
+  // mixing out at ~104 s by playing the song to its end.
   expect(pos).toBeGreaterThan(50);
   expect(pos).toBeLessThan(75);
   const outEnd = await page.evaluate(() => window.engine.auto._lastPlan.outEnd);
-  expect(Math.abs(outEnd - 72)).toBeLessThan(1.5);
+  expect(Math.abs(outEnd - 75)).toBeLessThan(1);
   await page.getByRole("button", { name: /Stop/ }).click();
 });
 
