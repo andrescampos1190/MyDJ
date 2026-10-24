@@ -654,3 +654,28 @@ button:disabled {
   border-color: var(--danger-border);
   color: var(--danger-text);
 }
+
+.copybox {
+  margin: 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 12px;
+}
+.copybox-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.copybox textarea {
+  width: 100%;
+  box-sizing: border-box;
+  height: 140px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  background: var(--bg);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}

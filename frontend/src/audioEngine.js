@@ -5,7 +5,7 @@
 import { guess } from "web-audio-beat-detector";
 import { PitchShifter } from "soundtouchjs";
 import { detectKey } from "./keyDetect";
-import { partyMixOut } from "./mixPoints";
+import { matchGainDb, partyMixOut } from "./mixPoints";
 import { bestInsertIndex, bpmDistance, orderForParty, transitionQuality } from "./ordering";
 
 // Backend base URL. Build-time configurable via VITE_API_URL (set it in production,
@@ -75,6 +75,7 @@ class Deck {
     this.id = id;
     this.engine = engine;
 
+    this.trim = ctx.createGain(); // volume matching (per-track loudness trim)
     this.gain = ctx.createGain(); // per-deck volume
     this.fade = ctx.createGain(); // crossfader contribution
     // 3-band EQ for bass-swap transitions: source -> low -> mid -> high -> gain.
@@ -90,7 +91,8 @@ class Deck {
     this.eqHigh.frequency.value = 4000;
     this.eqLow.connect(this.eqMid);
     this.eqMid.connect(this.eqHigh);
-    this.eqHigh.connect(this.gain);
+    this.eqHigh.connect(this.trim);
+    this.trim.connect(this.gain);
 
     this.gain.connect(this.fade);
     this.fade.connect(destination); // -> master
@@ -122,6 +124,13 @@ class Deck {
     this.isPlaying = false;
     this.cue = 0;
     this.resetEq();
+    this.applyTrim();
+  }
+
+  // Volume matching: bring each track to the same perceived loudness (LUFS).
+  applyTrim() {
+    const db = this.engine?.volumeMatch ? matchGainDb(this.meta?.lufs) : 0;
+    this.trim.gain.value = 10 ** (db / 20);
   }
 
   // Current playback position in buffer-seconds.
@@ -330,6 +339,7 @@ export class Engine {
     this.transitions = []; // per-adjacent-pair transition quality (after ordering)
     this.keyLock = false; // pitch-preserving tempo (SoundTouch) when true
     this.autoOrder = true; // slot each added track into its best spot (no API key needed)
+    this.volumeMatch = true; // play every track at the same loudness
     this._txn = 0; // transition generation; stale transition timers no-op
     this.resumable = null; // {idx} if a crashed set can be resumed (set by _restoreSession)
     this._wakeLock = null; // Screen Wake Lock sentinel held while a set runs
@@ -347,7 +357,15 @@ export class Engine {
     const ctx = new Ctor();
     this.ctx = ctx;
     this.master = ctx.createGain();
-    this.master.connect(ctx.destination);
+    // Safety limiter: volume-matched boosts and overlapping blends must never clip.
+    this.limiter = ctx.createDynamicsCompressor();
+    this.limiter.threshold.value = -1;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20;
+    this.limiter.attack.value = 0.003;
+    this.limiter.release.value = 0.25;
+    this.master.connect(this.limiter);
+    this.limiter.connect(ctx.destination);
     this.deckA = new Deck(ctx, this.master, "A", this);
     this.deckB = new Deck(ctx, this.master, "B", this);
     this.applyCrossfade(this.crossfade);
@@ -390,6 +408,7 @@ export class Engine {
           loop: this.auto.loop,
           transitionSecs: this.auto.transitionSecs,
           autoOrder: this.autoOrder,
+          volumeMatch: this.volumeMatch,
           party: this.auto.party,
           active: this.auto.active,
           ts: Date.now(),
@@ -424,6 +443,7 @@ export class Engine {
       this.auto.loop = !!data.loop;
       if (data.transitionSecs) this.auto.transitionSecs = data.transitionSecs;
       if (typeof data.autoOrder === "boolean") this.autoOrder = data.autoOrder;
+      if (typeof data.volumeMatch === "boolean") this.volumeMatch = data.volumeMatch;
       if (typeof data.party === "boolean") this.auto.party = data.party;
       // Only offer to resume if a set was actually mid-play when it died.
       if (data.active) {
@@ -569,6 +589,41 @@ export class Engine {
     this.emit();
     return true;
   }
+  setVolumeMatch(on) {
+    this.volumeMatch = on;
+    this.deckA.applyTrim();
+    this.deckB.applyTrim();
+    this.saveSession();
+    this.emit();
+  }
+
+  // Each track's analysis as plain data (the "Copy song data" button) — for checking
+  // how detection behaves on real songs.
+  songData() {
+    const blend = this.auto.transitionSecs;
+    return this.playlist.map((t) => {
+      const dur = t.loudness?.length || t.duration || null;
+      return {
+        title: t.title,
+        uploader: t.uploader,
+        url: t.url,
+        duration: dur,
+        bpm: t.bpm,
+        key: t.key,
+        camelot: t.camelot,
+        energy: t.energy,
+        genre: t.genre ?? null,
+        lufs: t.lufs ?? null,
+        gainDb: matchGainDb(t.lufs),
+        introEnd: t.introEnd,
+        outroStart: t.outroStart,
+        bigParts: t.bigParts ?? null,
+        partyMixOut: partyMixOut(t.bigParts, dur, { blend }),
+        loudness: t.loudness ?? null, // smoothed dB per second
+      };
+    });
+  }
+
   // Locked = can't be moved/removed right now: the playing track, and mid-blend the
   // incoming one.
   isLocked(id) {
@@ -1156,7 +1211,7 @@ class AutoMix {
     }
 
     if (this.party) {
-      const p = partyMixOut(curve, dur, { blend: this.transitionSecs });
+      const p = partyMixOut(front.meta?.bigParts, dur, { blend: this.transitionSecs });
       if (p != null && p < mixOutAt) mixOutAt = p;
     }
 

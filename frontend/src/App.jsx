@@ -189,6 +189,8 @@ function Playlist({ engine }) {
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState("");
+  const [copyText, setCopyText] = useState(""); // shown for manual copy if the clipboard is blocked
   const tracks = engine.playlist;
   const trans = engine.transitions;
   const running = auto.active;
@@ -243,6 +245,19 @@ function Playlist({ engine }) {
     }
   }
 
+  // One song per line: easy to paste into a chat and still readable.
+  async function copySongData() {
+    const text = "[\n" + engine.songData().map((d) => JSON.stringify(d)).join(",\n") + "\n]";
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyText("");
+      setCopied(`Copied ${tracks.length} song${tracks.length === 1 ? "" : "s"} ✓`);
+      setTimeout(() => setCopied(""), 3000);
+    } catch {
+      setCopyText(text);
+    }
+  }
+
   async function startSet(startIdx = 0) {
     setError("");
     if (tracks.length < 2) {
@@ -261,6 +276,15 @@ function Playlist({ engine }) {
     <div className="playlist">
       <div className="pl-head">
         <div className="xf-label">PLAYLIST · {tracks.length}</div>
+        {tracks.length > 0 && (
+          <button
+            className="ghost sm"
+            onClick={copySongData}
+            title="Copy each song's analysis (tempo, key, loudness, detected big parts) as text"
+          >
+            {copied || "📋 Copy song data"}
+          </button>
+        )}
         <div className="status">
           {running
             ? `${auto.status === "transitioning" ? "mixing…" : auto.status} · ${Math.min(
@@ -287,6 +311,17 @@ function Playlist({ engine }) {
         </button>
       </div>
       {error && <div className="error">{error}</div>}
+      {copyText && (
+        <div className="copybox">
+          <div className="copybox-head">
+            <span>Clipboard blocked — select all and copy:</span>
+            <button className="x" onClick={() => setCopyText("")} title="close">
+              ✕
+            </button>
+          </div>
+          <textarea readOnly value={copyText} onFocus={(e) => e.target.select()} autoFocus />
+        </div>
+      )}
       {engine.resumable && !running && (
         <div
           style={{
@@ -435,6 +470,13 @@ function Playlist({ engine }) {
           title="Slot each song you add into its best spot (key, tempo, energy). Off = add to the end."
         >
           🪄 Auto-order: {engine.autoOrder ? "ON" : "OFF"}
+        </button>
+        <button
+          className={`toggle ${engine.volumeMatch ? "on" : ""}`}
+          onClick={() => engine.setVolumeMatch(!engine.volumeMatch)}
+          title="Play every song at the same loudness, so no song jumps out louder or quieter"
+        >
+          🔊 Volume match: {engine.volumeMatch ? "ON" : "OFF"}
         </button>
         <button
           className={`toggle ${auto.party ? "on" : ""}`}

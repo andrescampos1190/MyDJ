@@ -1,52 +1,55 @@
 import { describe, expect, it } from "vitest";
-import { partyMixOut } from "./mixPoints";
-
-// Build a 100-point energy curve from [fromPct, toPct, level] sections.
-function curve(sections) {
-  const c = new Array(100).fill(0.5);
-  for (const [a, b, v] of sections) for (let i = a; i < b; i++) c[i] = v;
-  return c;
-}
+import { matchGainDb, partyMixOut } from "./mixPoints";
 
 describe("partyMixOut", () => {
-  // 240 s pop song: intro, verse, chorus 1 (60-90 s), verse, chorus 2 (135-165 s), outro.
-  const pop = curve([
-    [0, 8, 0.2],
-    [8, 25, 0.55],
-    [25, 38, 0.95],
-    [38, 56, 0.55],
-    [56, 69, 1],
-    [69, 100, 0.4],
-  ]);
+  // 240 s pop song: chorus 1 at 60-90 s, chorus 2 at 135-165 s.
+  const pop = [
+    [60, 90],
+    [135, 165],
+  ];
 
   it("mixes out over the tail of the first big part that ends after minPlay", () => {
-    const at = partyMixOut(pop, 240, { blend: 16 }); // chorus 1 ends at 91.2 s
-    expect(at).toBeCloseTo(91.2 - 8, 1);
+    expect(partyMixOut(pop, 240, { blend: 16 })).toBe(82);
   });
 
   it("skips big parts that end too early", () => {
-    const at = partyMixOut(pop, 240, { blend: 16, minPlay: 120 }); // chorus 2 ends at 165.6 s
-    expect(at).toBeCloseTo(165.6 - 8, 1);
+    expect(partyMixOut([[20, 45], ...pop], 240, { blend: 16 })).toBe(82);
+    expect(partyMixOut(pop, 240, { blend: 16, minPlay: 120 })).toBe(157);
   });
 
-  it("bridges a one-point dip inside a chorus", () => {
-    const dipped = pop.slice();
-    dipped[30] = 0.6;
-    expect(partyMixOut(dipped, 240, { blend: 16 })).toBeCloseTo(91.2 - 8, 1);
+  it("never starts the blend before the big part does", () => {
+    expect(partyMixOut([[58, 62]], 240, { blend: 16 })).toBe(58);
   });
 
-  it("caps play time when there's no clear big moment", () => {
-    expect(partyMixOut(new Array(100).fill(0.5), 400, { blend: 16 })).toBe(210);
-    expect(partyMixOut(new Array(100).fill(0.5), 120, { blend: 16 })).toBe(104); // dur - blend
+  it("leaves ~60% in when there's no detected structure", () => {
+    expect(partyMixOut([], 200, { blend: 16 })).toBe(120);
+    expect(partyMixOut(undefined, 80, { blend: 16 })).toBe(60); // at least minPlay...
+    expect(partyMixOut([], 50, { blend: 16 })).toBe(34); // ...but room for the blend
   });
 
-  it("always leaves room for the blend before the track ends", () => {
-    const late = curve([[80, 100, 1]]);
-    expect(partyMixOut(late, 200, { blend: 16 })).toBe(184);
+  it("caps play time and always leaves room for the blend", () => {
+    expect(partyMixOut([[150, 230]], 400, { blend: 16 })).toBe(165);
+    expect(partyMixOut([[160, 200]], 200, { blend: 16 })).toBe(165);
+    expect(partyMixOut([[100, 120]], 120, { blend: 16 })).toBe(104);
   });
 
-  it("returns null without analysis", () => {
-    expect(partyMixOut([], 200)).toBeNull();
-    expect(partyMixOut(null, 200)).toBeNull();
+  it("returns null without a duration", () => {
+    expect(partyMixOut(pop, 0)).toBeNull();
+    expect(partyMixOut(pop, undefined)).toBeNull();
+  });
+});
+
+describe("matchGainDb", () => {
+  it("brings tracks to the target loudness", () => {
+    expect(matchGainDb(-8)).toBe(-3); // loud master: turned down
+    expect(matchGainDb(-11)).toBe(0);
+    expect(matchGainDb(-14)).toBe(3); // quiet one: turned up
+  });
+
+  it("caps boosts and cuts, and ignores unknown loudness", () => {
+    expect(matchGainDb(-25)).toBe(4);
+    expect(matchGainDb(5)).toBe(-12);
+    expect(matchGainDb(null)).toBe(0);
+    expect(matchGainDb(undefined)).toBe(0);
   });
 });

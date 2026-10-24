@@ -213,6 +213,9 @@ def load(req: UrlRequest):
         "introEnd": feat["introEnd"],
         "outroStart": feat["outroStart"],
         "energyCurve": feat["energyCurve"],
+        "lufs": feat["lufs"],
+        "bigParts": feat["bigParts"],
+        "loudness": feat["loudness"],
     }
 
 

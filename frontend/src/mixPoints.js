@@ -1,37 +1,25 @@
-// Where to mix out of a track. Pure functions (no audio) so they're easy to unit-test.
+// Where to mix out of a track, and how loud to play it. Pure functions (no audio) so
+// they're easy to unit-test.
 
-const PEAK = 0.8; // near-peak energy (curve is RMS normalized to the track's loud level)
-
-// "Party" mix-out: leave right after the track's big moment (the first sustained
-// near-peak section — chorus / drop — that ends after `minPlay` s) instead of playing
-// it to the end, so the floor never sits through second verses and long outros.
-// `curve` = the backend's ~100-point energy curve; returns seconds, or null if unknown.
-export function partyMixOut(curve, dur, { blend = 16, minPlay = 60, maxPlay = 210 } = {}) {
-  if (!curve?.length || !(dur > 0)) return null;
-  const n = curve.length;
-  const step = dur / n;
-  const latest = Math.max(1, Math.min(maxPlay, dur - blend)); // the blend must end before the track does
-  // Near-peak points, bridging single-point dips (a snare fill shouldn't split a chorus).
-  const hot = curve.map(
-    (v, i) => v >= PEAK || (i > 0 && i < n - 1 && curve[i - 1] >= PEAK && curve[i + 1] >= PEAK)
-  );
-  const minLen = Math.max(2, Math.round(12 / step)); // >= ~12 s counts as "the big part"
-  for (let i = 0; i < n; ) {
-    if (!hot[i]) {
-      i++;
-      continue;
-    }
-    let j = i;
-    while (j < n && hot[j]) j++;
-    const start = i * step;
-    const end = j * step;
-    if (j - i >= minLen && end >= minPlay) {
-      // Start blending over the tail of the big part, so the next track's energy takes
-      // over as it ends rather than after the floor has already dropped.
-      const at = Math.max(start, end - blend / 2, Math.min(minPlay, latest));
-      return Math.min(at, latest);
-    }
-    i = j;
+// "Party" mix-out: leave over the tail of the track's first big part (chorus / drop,
+// detected by the backend as `bigParts` [[start, end], ...] seconds) that ends after
+// `minPlay`, instead of playing to the end — no second verses or long outros. With no
+// detected structure, leave ~60% in. Never past `maxPlay`, and always leave room for
+// the blend. Returns seconds, or null if the duration is unknown.
+export function partyMixOut(bigParts, dur, { blend = 16, minPlay = 60, maxPlay = 165 } = {}) {
+  if (!(dur > 0)) return null;
+  const latest = Math.max(1, Math.min(maxPlay, dur - blend));
+  for (const [start, end] of bigParts || []) {
+    // Start blending before the big part ends, so the next track's energy takes over
+    // as it finishes rather than after the floor has already dropped.
+    if (end >= minPlay) return Math.min(Math.max(start, end - blend / 2), latest);
   }
-  return latest; // no clear big moment: still don't overstay
+  return Math.min(Math.max(minPlay, dur * 0.6), latest);
+}
+
+// Volume matching: gain (dB) that brings a track's integrated loudness (LUFS) to
+// `target`. Boosts are capped — quiet masters would otherwise slam the limiter.
+export function matchGainDb(lufs, { target = -11, maxBoost = 4, maxCut = 12 } = {}) {
+  if (!Number.isFinite(lufs)) return 0;
+  return Math.max(-maxCut, Math.min(maxBoost, target - lufs));
 }

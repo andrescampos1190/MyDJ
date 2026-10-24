@@ -135,14 +135,71 @@ test("party mode mixes out after the big chorus, not at the end", async ({ page 
   const status = page.locator(".playlist .status");
   await expect(status).toContainText("playing · 1/2", { timeout: 30_000 });
   // party_song: big chorus 20-75 s, final chorus 90-120 s. Jump near the first one's end.
-  await page.evaluate(() => window.engine.seek(window.engine.deckA.isPlaying ? "A" : "B", 55));
+  await page.evaluate(() => window.engine.seek(window.engine.deckA.isPlaying ? "A" : "B", 50));
 
   await expect(status).toContainText("mixing", { timeout: 30_000 });
   const pos = await page.evaluate(() => {
     const e = window.engine;
     return [e.deckA, e.deckB].find((d) => d.meta?.title === "party_song").position();
   });
-  expect(pos).toBeGreaterThan(65); // tail of the first chorus (~67.6 s)...
-  expect(pos).toBeLessThan(80); // ...not ~104 s, where playing it to the end would mix out
+  // Detected big part ~23-72 s -> blend starts ~64 s, over the chorus's tail...
+  expect(pos).toBeGreaterThan(60);
+  expect(pos).toBeLessThan(75); // ...not ~104 s, where playing it to the end would mix out
   await page.getByRole("button", { name: /Stop/ }).click();
+});
+
+test("volume match plays a loud and a quiet master at the same level", async ({ page }) => {
+  await page.goto("/");
+  // Output level (dB RMS, pre-limiter) of a track played alone on deck A.
+  const level = (name) =>
+    page.evaluate(async (url) => {
+      const e = window.engine;
+      await e.loadUrlToDeck("A", url);
+      e.setCrossfade(0);
+      e.play("A");
+      const an = e.ctx.createAnalyser();
+      e.master.connect(an);
+      const buf = new Float32Array(an.fftSize);
+      let sum = 0;
+      let n = 0;
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        an.getFloatTimeDomainData(buf);
+        for (const v of buf) {
+          sum += v * v;
+          n++;
+        }
+      }
+      e.master.disconnect(an);
+      e.deckA.stop();
+      return 10 * Math.log10(sum / n);
+    }, `${MEDIA}/${name}.mp3`);
+
+  await expect(page.getByRole("button", { name: /Volume match: ON/ })).toBeVisible();
+  const matched = (await level("loud")) - (await level("quiet"));
+  expect(Math.abs(matched)).toBeLessThan(1.5);
+
+  await page.getByRole("button", { name: /Volume match/ }).click();
+  await expect(page.getByRole("button", { name: /Volume match: OFF/ })).toBeVisible();
+  const raw = (await level("loud")) - (await level("quiet"));
+  expect(raw).toBeGreaterThan(3.5); // the 5 dB difference is back
+});
+
+test("copy song data puts each track's analysis on the clipboard", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await page.locator(".loadbar input").fill(`${MEDIA}/party_song.mp3`);
+  await page.locator(".loadbar button").click();
+  await expect(page.locator(".tracks li", { hasText: "party_song" })).toBeVisible({ timeout: 60_000 });
+
+  await page.getByRole("button", { name: /Copy song data/ }).click();
+  await expect(page.getByRole("button", { name: /Copied 1 song/ })).toBeVisible();
+  const data = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
+  expect(data).toHaveLength(1);
+  expect(data[0]).toMatchObject({ title: "party_song", camelot: "8A", duration: 120 });
+  expect(data[0].bigParts.length).toBeGreaterThan(0);
+  expect(data[0].loudness).toHaveLength(120);
+  expect(data[0].partyMixOut).toBeGreaterThan(55);
+  expect(data[0].partyMixOut).toBeLessThan(75);
+  expect(typeof data[0].lufs).toBe("number");
 });

@@ -23,8 +23,15 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
     spot; songs already in the list never move, so your manual order is kept.
 - **Live queue**: add songs while a set is playing, **⏭ Next** to play one next, **▲▼** to
   reorder, **✕** to drop one. The playing track (and, mid-blend, the incoming one) is locked.
-- **🔥 Party mode** (on by default): mixes out right after each song's big moment (chorus/drop)
-  instead of playing it to the end — no second verses or long outros; ~3.5 min max per song.
+- **🔥 Party mode** (on by default): mixes out over the tail of each song's first big part
+  (chorus/drop) that ends after 1 min, instead of playing it to the end — no second verses or
+  long outros. Big parts are the loudest ~30% of the song *relative to itself* (per-second
+  loudness smoothed over ~7 s), so loudly mastered songs work too. No clear structure → leaves
+  ~60% in; never more than 2:45 per song.
+- **🔊 Volume match** (on by default): every song plays at the same perceived loudness (EBU R128
+  LUFS, measured on load), with a safety limiter on the output so nothing clips.
+- **📋 Copy song data**: copies each song's analysis (tempo, key, loudness curve, big parts, where
+  Party mode will mix out) as text — handy for checking how detection does on real songs.
 - **Genre** from the source's metadata (site genre field, uploader tags, title) — free; AI
   Polish can still label the rest.
 - **Mixes hands-free** with correct transitions: phrase/bar-aligned, **beat-matched**,

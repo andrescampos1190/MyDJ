@@ -7,6 +7,7 @@ good enough for harmonic/energy-aware set ordering. BPM + beat offset are comput
 client-side (web-audio-beat-detector), so we don't duplicate them here.
 """
 
+import re
 import subprocess
 
 import numpy as np
@@ -150,10 +151,59 @@ def _structure(y: np.ndarray) -> dict:
     return {"introEnd": round(introEnd, 2), "outroStart": round(outroStart, 2), "energyCurve": curve}
 
 
+def _lufs(path: str) -> float | None:
+    """Integrated loudness (EBU R128, LUFS) via ffmpeg's meter — for volume matching."""
+    out = subprocess.run(
+        ["ffmpeg", "-nostats", "-hide_banner", "-i", path, "-af", "ebur128=framelog=quiet",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    m = re.findall(r"I:\s+(-?[\d.]+) LUFS", out.stderr)
+    if not m:
+        return None
+    v = float(m[-1])  # the last one is the summary's
+    return round(v, 1) if v > -60 else None  # silence reads as -70
+
+
+def _sections(y: np.ndarray) -> dict:
+    """Per-second loudness (dB, smoothed over ~7 s so beats don't count) and the
+    track's "big parts": stretches in its loudest ~30% (choruses / drops). Relative to
+    the track itself, so heavily compressed masters still separate verse from chorus."""
+    n = y.size // SR
+    if n < 20:
+        return {"loudness": [], "bigParts": []}
+    rms = np.sqrt(np.mean(y[: n * SR].reshape(n, SR) ** 2, axis=1))
+    db = 20 * np.log10(rms + 1e-9)
+    k = 7
+    smooth = np.convolve(np.pad(db, k // 2, mode="edge"), np.ones(k) / k, mode="valid")
+    loudness = [round(float(v), 1) for v in smooth]
+    if smooth.max() - smooth.min() < 1.0:  # flat (or silent): no structure to find
+        return {"loudness": loudness, "bigParts": []}
+    hot = smooth >= np.percentile(smooth, 70) - 0.3  # tolerance: flat plateaus stay whole
+    parts = []
+    i = 0
+    while i < n:
+        if not hot[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and hot[j]:
+            j += 1
+        if parts and i - parts[-1][1] <= 3:  # bridge short dips (fills, breaths)
+            parts[-1][1] = j
+        else:
+            parts.append([i, j])
+        i = j
+    big = [[float(a), float(b)] for a, b in parts if b - a >= 8]
+    return {"loudness": loudness, "bigParts": big}
+
+
 def analyze(path: str) -> dict:
-    """Return {key, camelot, energy, introEnd, outroStart}. Never raises."""
+    """Return {key, camelot, energy, introEnd, outroStart, energyCurve, lufs, bigParts,
+    loudness}. Never raises."""
     nulls = {"key": None, "camelot": None, "energy": None, "introEnd": 0.0,
-             "outroStart": 0.0, "energyCurve": []}
+             "outroStart": 0.0, "energyCurve": [], "lufs": None, "bigParts": [],
+             "loudness": []}
     try:
         y = _decode(path)
         if y.size < SR:  # decode failed or clip too short
@@ -164,6 +214,7 @@ def analyze(path: str) -> dict:
             mid = y.size // 2
             ymid = y[mid - SR * 45: mid + SR * 45]
         name, camelot = _detect_key(_chromagram(ymid))
-        return {"key": name, "camelot": camelot, "energy": _energy(ymid), **structure}
+        return {"key": name, "camelot": camelot, "energy": _energy(ymid), **structure,
+                **_sections(y), "lufs": _lufs(path)}
     except Exception:
         return nulls
