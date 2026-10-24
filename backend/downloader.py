@@ -13,6 +13,8 @@ import uuid
 
 import yt_dlp
 
+from genre import guess_genre
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Overridable so tests (or a host with a separate scratch disk) can point it elsewhere.
 DOWNLOAD_DIR = os.environ.get("MYDJ_DOWNLOAD_DIR") or os.path.join(BASE_DIR, "downloads")
@@ -93,6 +95,7 @@ def get_info(url: str) -> dict:
         "duration": info.get("duration"),
         "thumbnail": info.get("thumbnail"),
         "uploader": info.get("uploader"),
+        "genre": guess_genre(info),
     }
 
 
@@ -164,4 +167,5 @@ def download(url: str, mode: str) -> dict:
         "duration": info.get("duration"),
         "thumbnail": info.get("thumbnail"),
         "uploader": info.get("uploader"),
+        "genre": guess_genre(info),
     }

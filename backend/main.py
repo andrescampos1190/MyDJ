@@ -205,6 +205,7 @@ def load(req: UrlRequest):
         "duration": res["duration"],
         "thumbnail": res["thumbnail"],
         "uploader": res["uploader"],
+        "genre": res["genre"],
         "audioUrl": f"/api/audio/{res['id']}",
         "key": feat["key"],
         "camelot": feat["camelot"],

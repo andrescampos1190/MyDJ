@@ -10,12 +10,13 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from audio_fixtures import PROGRESSIONS, progression, write_audio  # noqa: E402
+from audio_fixtures import PROGRESSIONS, party_song, progression, write_audio  # noqa: E402
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 9100
 root = tempfile.mkdtemp(prefix="mydj-media-")
 for key in PROGRESSIONS:
     write_audio(os.path.join(root, key.replace(" ", "_") + ".mp3"), progression(key))
+write_audio(os.path.join(root, "party_song.mp3"), party_song())
 
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
 print(f"serving {sorted(os.listdir(root))} on http://127.0.0.1:{port}", flush=True)

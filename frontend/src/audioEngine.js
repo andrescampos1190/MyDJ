@@ -5,7 +5,8 @@
 import { guess } from "web-audio-beat-detector";
 import { PitchShifter } from "soundtouchjs";
 import { detectKey } from "./keyDetect";
-import { bpmDistance, orderForParty, transitionQuality } from "./ordering";
+import { partyMixOut } from "./mixPoints";
+import { bestInsertIndex, bpmDistance, orderForParty, transitionQuality } from "./ordering";
 
 // Backend base URL. Build-time configurable via VITE_API_URL (set it in production,
 // e.g. https://your-backend.onrender.com); falls back to the local dev backend.
@@ -328,6 +329,7 @@ export class Engine {
     this.playlist = []; // analyzed, decoded tracks (the party set)
     this.transitions = []; // per-adjacent-pair transition quality (after ordering)
     this.keyLock = false; // pitch-preserving tempo (SoundTouch) when true
+    this.autoOrder = true; // slot each added track into its best spot (no API key needed)
     this._txn = 0; // transition generation; stale transition timers no-op
     this.resumable = null; // {idx} if a crashed set can be resumed (set by _restoreSession)
     this._wakeLock = null; // Screen Wake Lock sentinel held while a set runs
@@ -387,6 +389,8 @@ export class Engine {
           idx: this.auto.active ? this.auto.idx : 0,
           loop: this.auto.loop,
           transitionSecs: this.auto.transitionSecs,
+          autoOrder: this.autoOrder,
+          party: this.auto.party,
           active: this.auto.active,
           ts: Date.now(),
         })
@@ -419,6 +423,8 @@ export class Engine {
       this._recomputeTransitions();
       this.auto.loop = !!data.loop;
       if (data.transitionSecs) this.auto.transitionSecs = data.transitionSecs;
+      if (typeof data.autoOrder === "boolean") this.autoOrder = data.autoOrder;
+      if (typeof data.party === "boolean") this.auto.party = data.party;
       // Only offer to resume if a set was actually mid-play when it died.
       if (data.active) {
         this.resumable = { idx: Math.max(0, Math.min(data.idx || 0, this.playlist.length - 1)) };
@@ -516,15 +522,80 @@ export class Engine {
   }
 
   // ---- Playlist ----
+  // Works mid-set too. With autoOrder the track goes to its best harmonic/tempo spot;
+  // otherwise to the end of the queue. Existing tracks never move (manual order stays).
   async addTrack(url) {
     const track = await this._fetchAndDecode(url);
     // Analysis is done; drop the decoded PCM (~80 MB) so memory stays flat over a
     // long set. It's re-decoded on demand (the backend keeps the mp3 for the session).
     track.buffer = null;
-    this.playlist.push(track);
+    const n = this.playlist.length;
+    let lo = 0;
+    let hi = n;
+    const a = this.auto;
+    if (a.active) {
+      // Never land on/before the playing track or ahead of the preloaded next one.
+      const next = a._nextIdx();
+      if (next > a.idx) lo = Math.min(next + 1, n);
+      else [lo, hi] = [next + 1, Math.max(next + 1, a.idx)]; // looping set has wrapped
+    }
+    const p = this.autoOrder ? bestInsertIndex(this.playlist, track, lo, hi) : hi;
+    this._reorder((list) => list.splice(p, 0, track));
+    return track;
+  }
+
+  // Apply a playlist edit, keeping the auto-mixer's position on the same track object.
+  // Mid-blend, the incoming track must stay next (the handoff advances to "next"), so
+  // an edit that would change it is refused. Returns whether the edit was applied.
+  _reorder(edit) {
+    const a = this.auto;
+    const before = this.playlist.slice();
+    const current = a.active ? before[a.idx] : null;
+    const incoming = a.active && a._transitioning ? before[a._nextIdx()] : null;
+    const list = before.slice();
+    edit(list);
+    if (current && !list.includes(current)) return false; // never drop the playing track
+    this.playlist = list;
+    if (current) {
+      a.idx = list.indexOf(current);
+      if (incoming && list[a._nextIdx()] !== incoming) {
+        this.playlist = before;
+        a.idx = before.indexOf(current);
+        return false;
+      }
+    }
+    this._recomputeTransitions();
     this._saveSoon();
     this.emit();
-    return track;
+    return true;
+  }
+  // Locked = can't be moved/removed right now: the playing track, and mid-blend the
+  // incoming one.
+  isLocked(id) {
+    const a = this.auto;
+    if (!a.active) return false;
+    const t = this.playlist[a.idx];
+    const inc = a._transitioning ? this.playlist[a._nextIdx()] : null;
+    return t?.id === id || inc?.id === id;
+  }
+  moveTrack(id, to) {
+    return this._reorder((list) => {
+      const i = list.findIndex((t) => t.id === id);
+      if (i < 0) return;
+      const [t] = list.splice(i, 1);
+      list.splice(Math.max(0, Math.min(to, list.length)), 0, t);
+    });
+  }
+  // Queue a track right after the one playing (or first, if no set is running).
+  playNext(id) {
+    const a = this.auto;
+    const current = a.active ? this.playlist[a.idx] : null;
+    return this._reorder((list) => {
+      const i = list.findIndex((t) => t.id === id);
+      if (i < 0 || list[i] === current) return;
+      const [t] = list.splice(i, 1);
+      list.splice(current ? list.indexOf(current) + 1 : 0, 0, t);
+    });
   }
 
   // Decode a playlist track's audio on demand (we don't keep ~90 buffers in RAM).
@@ -548,11 +619,10 @@ export class Engine {
   }
   removeTrack(id) {
     const t = this.playlist.find((x) => x.id === id);
-    if (t) evictAudio(`${API}${t.audioUrl}`);
-    this.playlist = this.playlist.filter((x) => x.id !== id);
-    this._recomputeTransitions();
-    this._saveSoon();
-    this.emit();
+    if (!t || this.isLocked(id)) return false;
+    const ok = this._reorder((list) => list.splice(list.indexOf(t), 1));
+    if (ok) evictAudio(`${API}${t.audioUrl}`);
+    return ok;
   }
   clearPlaylist() {
     this.playlist = [];
@@ -866,6 +936,7 @@ class AutoMix {
     this._finalize = null; // pending handoff finalizer (run by timer OR watchdog)
     this._deadline = 0; // ctx time by which a transition must be finalized
     this.loop = false; // when true, wrap back to the start at the end (never stop)
+    this.party = true; // mix out after each track's big moment instead of at its outro
   }
 
   get tracks() {
@@ -1082,6 +1153,11 @@ class AutoMix {
           }
         }
       }
+    }
+
+    if (this.party) {
+      const p = partyMixOut(curve, dur, { blend: this.transitionSecs });
+      if (p != null && p < mixOutAt) mixOutAt = p;
     }
 
     if (ended) this._beginTransition(back, 4);

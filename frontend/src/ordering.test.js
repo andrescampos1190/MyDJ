@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bestInsertIndex,
   bpmDistance,
   camelotCompat,
   orderForParty,
@@ -86,5 +87,28 @@ describe("orderForParty", () => {
 
   it("leaves two-track lists alone", () => {
     expect(orderForParty(set.slice(0, 2)).ordered).toEqual(set.slice(0, 2));
+  });
+});
+
+describe("bestInsertIndex", () => {
+  const set = [
+    { id: "a", camelot: "8A", bpm: 122, energy: 3 },
+    { id: "b", camelot: "9A", bpm: 124, energy: 5 },
+    { id: "c", camelot: "3B", bpm: 95, energy: 6 },
+  ];
+
+  it("slots a track between its closest harmonic/tempo neighbours", () => {
+    const t = { camelot: "8A", bpm: 123, energy: 4 };
+    expect(bestInsertIndex(set, t)).toBe(1); // between a (8A/122) and b (9A/124)
+  });
+
+  it("respects the allowed range", () => {
+    const t = { camelot: "8A", bpm: 123, energy: 4 };
+    expect(bestInsertIndex(set, t, 2, 3)).toBe(2); // best spot still left in 2..3
+    expect(bestInsertIndex(set, t, 3, 3)).toBe(3);
+  });
+
+  it("goes to the end of an empty list", () => {
+    expect(bestInsertIndex([], { camelot: "8A" })).toBe(0);
   });
 });
