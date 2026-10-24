@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from analyzer import analyze
-from audio_fixtures import SR, progression, write_audio
+from audio_fixtures import SR, party_song, progression, write_audio
 from conftest import needs_ffmpeg
 
 pytestmark = needs_ffmpeg
@@ -41,3 +41,24 @@ def test_unreadable_file_never_raises(tmp_path):
     bad.write_bytes(b"not audio")
     res = analyze(str(bad))
     assert res["key"] is None and res["energy"] is None
+
+
+def test_big_parts_find_the_choruses(tmp_path):
+    res = analyze(write_audio(str(tmp_path / "t.mp3"), party_song()))
+    (a0, a1), (b0, b1) = res["bigParts"]  # choruses at 20-75 s and 90-120 s
+    assert 18 <= a0 <= 26 and 69 <= a1 <= 77
+    assert 88 <= b0 <= 96 and b1 >= 116
+    assert len(res["loudness"]) == 120
+
+
+def test_lufs_tracks_level(tmp_path):
+    y = progression("C major")
+    loud = analyze(write_audio(str(tmp_path / "loud.mp3"), y))["lufs"]
+    quiet = analyze(write_audio(str(tmp_path / "quiet.mp3"), y * 10 ** (-12 / 20)))["lufs"]
+    assert -30 < loud < -5
+    assert loud - quiet == pytest.approx(12, abs=0.5)
+
+
+def test_silence_has_no_loudness(tmp_path):
+    res = analyze(write_audio(str(tmp_path / "t.mp3"), np.zeros(SR * 30)))
+    assert res["lufs"] is None and res["bigParts"] == []

@@ -6,4 +6,5 @@ $root = $PSScriptRoot
 $py = Join-Path $root "backend\venv\Scripts\python.exe"
 if (-not (Test-Path $py)) { Write-Host "venv not found at $py — see README setup." -ForegroundColor Red; exit 1 }
 Write-Host "MyDJ backend -> http://localhost:8000   (keep this window open; Ctrl+C to stop)" -ForegroundColor Cyan
-& $py -m uvicorn main:app --app-dir (Join-Path $root "backend") --port 8000
+# --host 0.0.0.0: reachable from phones on the same Wi-Fi (party session).
+& $py -m uvicorn main:app --app-dir (Join-Path $root "backend") --host 0.0.0.0 --port 8000

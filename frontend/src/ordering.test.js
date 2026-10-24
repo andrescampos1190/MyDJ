@@ -6,6 +6,7 @@ import {
   orderForParty,
   relativeEnergies,
   transitionQuality,
+  voteOrder,
 } from "./ordering";
 
 describe("camelotCompat", () => {
@@ -110,5 +111,31 @@ describe("bestInsertIndex", () => {
 
   it("goes to the end of an empty list", () => {
     expect(bestInsertIndex([], { camelot: "8A" })).toBe(0);
+  });
+});
+
+describe("voteOrder", () => {
+  const prev = { id: "p", camelot: "8A", bpm: 124 };
+  const near = { id: "near", camelot: "8A", bpm: 124 }; // mixes perfectly from prev
+  const far = { id: "far", camelot: "3B", bpm: 95 };
+  const fan = { id: "fan", camelot: "2B", bpm: 90 }; // clashes, but has votes
+  const votes = { fan: 3 };
+  const ids = (list) => list.map((t) => t.id);
+
+  it("plays the most-voted songs first, even if they clash", () => {
+    expect(ids(voteOrder(prev, [near, far, fan], (t) => votes[t.id]))[0]).toBe("fan");
+  });
+
+  it("orders equal votes for the smoothest mix", () => {
+    expect(ids(voteOrder(prev, [far, near], () => 0))).toEqual(["near", "far"]);
+  });
+
+  it("keeps the current order within equal votes when not smoothing", () => {
+    expect(ids(voteOrder(prev, [far, near], () => 0, { smooth: false }))).toEqual(["far", "near"]);
+  });
+
+  it("puts downvoted songs last", () => {
+    const s = { near: -1, far: 1 };
+    expect(ids(voteOrder(prev, [near, far, fan], (t) => s[t.id]))).toEqual(["far", "fan", "near"]);
   });
 });

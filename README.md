@@ -23,8 +23,15 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
     spot; songs already in the list never move, so your manual order is kept.
 - **Live queue**: add songs while a set is playing, **⏭ Next** to play one next, **▲▼** to
   reorder, **✕** to drop one. The playing track (and, mid-blend, the incoming one) is locked.
-- **🔥 Party mode** (on by default): mixes out right after each song's big moment (chorus/drop)
-  instead of playing it to the end — no second verses or long outros; ~3.5 min max per song.
+- **🔥 Party mode** (on by default): mixes out over the tail of each song's first big part
+  (chorus/drop) that ends after 1 min, instead of playing it to the end — no second verses or
+  long outros. Big parts are the loudest ~30% of the song *relative to itself* (per-second
+  loudness smoothed over ~7 s), so loudly mastered songs work too. No clear structure → leaves
+  ~60% in; never more than 2:45 per song.
+- **🔊 Volume match** (on by default): every song plays at the same perceived loudness (EBU R128
+  LUFS, measured on load), with a safety limiter on the output so nothing clips.
+- **📋 Copy song data**: copies each song's analysis (tempo, key, loudness curve, big parts, where
+  Party mode will mix out) as text — handy for checking how detection does on real songs.
 - **Genre** from the source's metadata (site genre field, uploader tags, title) — free; AI
   Polish can still label the rest.
 - **Mixes hands-free** with correct transitions: phrase/bar-aligned, **beat-matched**,
@@ -114,6 +121,27 @@ all of the above on every push, plus a Docker build check and the live tests.
    and silences both decks cleanly.
 4. During the set, keep adding songs; use **⏭ Next** / **▲▼** / **✕** to steer the queue. **NOW**
    and **NEXT** tags show what's playing and what's mixing in next.
+
+## Party session (friends add songs and vote from their phones)
+1. Start the app as usual (`.\start.ps1`). The backend and frontend now listen on your home
+   network too. **The first time, Windows asks whether to allow Python and Node.js through the
+   firewall — allow them on Private networks**, or phones can't connect.
+2. In the app, turn on **📱 Party session**. A QR code and a link like
+   `http://192.168.1.23:5173/guest` appear.
+3. Friends on the **same Wi-Fi** scan the code, type their name once, then:
+   - **search** for a song by name (top YouTube results) or **paste a link**, and tap **＋ Add**;
+   - **▲ / ▼ vote** on anything queued (tap again to take a vote back).
+4. How the queue reacts:
+   - **Votes win, the mix stays smooth:** songs with more net votes play sooner; among songs with
+     equal votes, auto-order picks the best-mixing order (or keeps your manual order if
+     **🪄 Auto-order** is off).
+   - A song at **-3** net votes is dropped.
+   - The song playing and the one already mixing in never move.
+   - You can still reorder/remove on the DJ screen; votes re-sort the queue whenever they change.
+   - Friends' songs show who added them (👤) and their votes (▲ / ▼).
+
+> Anyone on your Wi-Fi can open the party page and add songs. It's meant for your home network;
+> don't port-forward it to the internet.
 
 ## How it works
 - **Analysis** (`backend/analyzer.py`): ffmpeg → PCM, an FFT chromagram + Krumhansl–Schmuckler

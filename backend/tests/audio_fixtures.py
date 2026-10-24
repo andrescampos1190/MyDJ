@@ -56,3 +56,8 @@ def party_song() -> np.ndarray:
     t = np.arange(len(y)) / SR
     loud = ((t >= 20) & (t < 75)) | (t >= 90)
     return y * np.where(loud, 1.0, 0.15)
+
+
+def loud_song() -> np.ndarray:
+    """A dense, loudly mastered track (~-10 LUFS) for volume-matching tests."""
+    return np.tanh(3 * progression("C major")) * 0.9

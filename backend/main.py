@@ -23,8 +23,9 @@ from starlette.background import BackgroundTask
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from analyzer import analyze
-from downloader import DOWNLOAD_DIR, download, get_info
+from downloader import DOWNLOAD_DIR, download, get_info, search
 from llm_order import order_tracks
+from party import Party, lan_addresses
 
 # Load backend/.env (e.g. ANTHROPIC_API_KEY for AI Polish) regardless of CWD.
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
@@ -82,9 +83,17 @@ ALLOWED_ORIGINS = [
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",") if o.strip()
 ]
 
+# Without ALLOWED_ORIGINS, also allow the app as opened from phones on the home network
+# (private-range IPs), so friends can join a party session.
+_LAN_ORIGIN_RE = (
+    r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+"
+    r"|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$"
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=None if "ALLOWED_ORIGINS" in os.environ else _LAN_ORIGIN_RE,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
@@ -102,6 +111,24 @@ class DownloadRequest(BaseModel):
 
 class OrderRequest(BaseModel):
     tracks: list[dict]
+
+
+class PartyRequest(BaseModel):
+    url: str
+    name: str = ""
+
+
+class VoteRequest(BaseModel):
+    trackId: str
+    voter: str
+    value: int  # +1 up, -1 down, 0 take back
+
+
+class SyncRequest(BaseModel):
+    snapshot: dict = {}
+
+
+party = Party()
 
 
 def _validate_url(url: str) -> None:
@@ -177,9 +204,13 @@ def load(req: UrlRequest):
     URL the browser streams into Web Audio. The file lives on the server only for
     the session (wiped on startup) and never lands in the user's downloads.
     """
-    _validate_url(req.url)
+    return _load_track(req.url)
+
+
+def _load_track(url: str) -> dict:
+    _validate_url(url)
     try:
-        res = download(req.url, "audio")
+        res = download(url, "audio")
     except (DownloadError, ExtractorError) as exc:
         msg = _clean_error(exc)
         if _is_network_err(msg):
@@ -213,6 +244,9 @@ def load(req: UrlRequest):
         "introEnd": feat["introEnd"],
         "outroStart": feat["outroStart"],
         "energyCurve": feat["energyCurve"],
+        "lufs": feat["lufs"],
+        "bigParts": feat["bigParts"],
+        "loudness": feat["loudness"],
     }
 
 
@@ -264,3 +298,53 @@ def download_endpoint(req: DownloadRequest):
         filename=result["filename"],
         background=BackgroundTask(_cleanup, result["path"]),
     )
+
+
+# ---- Party session (friends add + vote from their phones) ----------------------------
+
+
+@app.get("/api/search")
+def search_songs(q: str):
+    """YouTube search by song name, for guests' phones."""
+    q = q.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Type a song or artist name")
+    try:
+        return {"results": search(q[:200])}
+    except (DownloadError, ExtractorError) as exc:
+        msg = _clean_error(exc)
+        raise HTTPException(status_code=400, detail=BOT_CHECK_DETAIL if _is_bot_check(msg) else msg)
+
+
+@app.post("/api/party/request")
+def party_request(req: PartyRequest):
+    """A guest adds a song: download + analyze now, the host picks it up on its next sync."""
+    track = _load_track(req.url)
+    track["url"] = req.url
+    track["addedBy"] = req.name.strip()[:30] or "Guest"
+    party.request(track)
+    return {"id": track["id"], "title": track["title"]}
+
+
+@app.post("/api/party/vote")
+def party_vote(req: VoteRequest):
+    if not ID_RE.match(req.trackId) or not req.voter:
+        raise HTTPException(status_code=400, detail="Bad vote")
+    party.vote(req.trackId, req.voter[:64], req.value)
+    return {"ok": True}
+
+
+@app.get("/api/party/queue")
+def party_queue(voter: str = ""):
+    return party.view(voter[:64])
+
+
+@app.post("/api/party/sync")
+def party_sync(req: SyncRequest):
+    """Host heartbeat (every ~2 s while the party session is on)."""
+    return party.sync(req.snapshot)
+
+
+@app.get("/api/party/info")
+def party_info():
+    return {"addresses": lan_addresses()}

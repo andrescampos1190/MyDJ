@@ -169,3 +169,30 @@ def download(url: str, mode: str) -> dict:
         "uploader": info.get("uploader"),
         "genre": guess_genre(info),
     }
+
+
+def search(query: str, limit: int = 6) -> list[dict]:
+    """Top YouTube results for ``query`` (no download) — how guests find songs by name."""
+    opts = {
+        **_NET_OPTS,
+        **_cookie_opts(),
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+    out = []
+    for e in info.get("entries") or []:
+        if not e or not e.get("id"):
+            continue
+        thumbs = e.get("thumbnails") or []
+        out.append({
+            "title": e.get("title"),
+            "url": e.get("url") or f"https://www.youtube.com/watch?v={e['id']}",
+            "duration": e.get("duration"),
+            "channel": e.get("channel") or e.get("uploader"),
+            "thumbnail": thumbs[-1].get("url") if thumbs else None,
+        })
+    return out

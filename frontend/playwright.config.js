@@ -42,4 +42,4 @@ export default defineConfig({
   ],
 });
 
-export { MEDIA_PORT };
+export { API_PORT, MEDIA_PORT };

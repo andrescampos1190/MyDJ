@@ -654,3 +654,69 @@ button:disabled {
   border-color: var(--danger-border);
   color: var(--danger-text);
 }
+
+.copybox {
+  margin: 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 12px;
+}
+.copybox-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.copybox textarea {
+  width: 100%;
+  box-sizing: border-box;
+  height: 140px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  background: var(--bg);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.party {
+  margin: 0 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+.party-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.party-join {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.party-join img {
+  width: 140px;
+  height: 140px;
+  border-radius: 8px;
+  background: #fff;
+}
+.party-url {
+  font-size: 16px;
+  font-weight: 700;
+  word-break: break-all;
+  margin: 2px 0 4px;
+}
+.chip.who {
+  color: var(--muted);
+}
+.chip.votes {
+  color: #34d399;
+}
+.chip.votes.down {
+  color: var(--danger-text);
+}
