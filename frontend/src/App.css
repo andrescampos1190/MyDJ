@@ -328,7 +328,13 @@ button:disabled {
 }
 .now-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 12px;
+}
+.now-style {
+  font-size: 13px;
+  color: var(--muted);
 }
 .now.idle {
   align-items: flex-start;

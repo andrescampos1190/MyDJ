@@ -13,6 +13,8 @@ import subprocess
 import numpy as np
 from scipy.signal import stft
 
+from beatgrid import beat_grid
+
 SR = 22050
 
 # Krumhansl-Schmuckler key profiles (major / natural minor), tonic at index 0.
@@ -200,10 +202,10 @@ def _sections(y: np.ndarray) -> dict:
 
 def analyze(path: str) -> dict:
     """Return {key, camelot, energy, introEnd, outroStart, energyCurve, lufs, bigParts,
-    loudness}. Never raises."""
+    loudness, grid}. Never raises."""
     nulls = {"key": None, "camelot": None, "energy": None, "introEnd": 0.0,
              "outroStart": 0.0, "energyCurve": [], "lufs": None, "bigParts": [],
-             "loudness": []}
+             "loudness": [], "grid": None}
     try:
         y = _decode(path)
         if y.size < SR:  # decode failed or clip too short
@@ -214,7 +216,11 @@ def analyze(path: str) -> dict:
             mid = y.size // 2
             ymid = y[mid - SR * 45: mid + SR * 45]
         name, camelot = _detect_key(_chromagram(ymid))
+        try:
+            grid = beat_grid(y, SR)
+        except Exception:
+            grid = None
         return {"key": name, "camelot": camelot, "energy": _energy(ymid), **structure,
-                **_sections(y), "lufs": _lufs(path)}
+                **_sections(y), "lufs": _lufs(path), "grid": grid}
     except Exception:
         return nulls

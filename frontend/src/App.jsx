@@ -227,7 +227,7 @@ function NowPlaying({ engine, onStart }) {
     );
   }
 
-  const { track, next, pos, dur, mixAt, transitioning, canMixNow } = info;
+  const { track, next, pos, dur, mixAt, style, transitioning, canMixNow } = info;
   const front = engine.deck(auto.front);
   const until = mixAt != null ? mixAt - pos : null;
   return (
@@ -257,7 +257,7 @@ function NowPlaying({ engine, onStart }) {
         <span>{fmt(pos)}</span>
         <span className="now-next">
           {transitioning
-            ? `Mixing into ${next?.title || "the next song"}…`
+            ? `${style || "Mixing"} → ${next?.title || "the next song"}`
             : next
               ? until != null && until > 0
                 ? `Mixing into ${next.title} in ${fmt(until)}`
@@ -267,6 +267,7 @@ function NowPlaying({ engine, onStart }) {
         <span>{fmt(dur)}</span>
       </div>
       <div className="now-actions">
+        {style && !transitioning && <span className="now-style">{style}</span>}
         <button
           className="btn"
           onClick={() => auto.mixNow()}

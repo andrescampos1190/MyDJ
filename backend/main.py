@@ -250,6 +250,7 @@ def _load_track(url: str) -> dict:
         "lufs": feat["lufs"],
         "bigParts": feat["bigParts"],
         "loudness": feat["loudness"],
+        "grid": feat["grid"],  # {bpm, beat, downbeat, confidence} or None
     }
 
 

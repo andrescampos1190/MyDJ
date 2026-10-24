@@ -61,3 +61,30 @@ def party_song() -> np.ndarray:
 def loud_song() -> np.ndarray:
     """A dense, loudly mastered track (~-10 LUFS) for volume-matching tests."""
     return np.tanh(3 * progression("C major")) * 0.9
+
+
+def groove(bpm: float, first_beat: float = 0.0, secs: float = 60.0, key: str = "A minor") -> np.ndarray:
+    """A produced-style 4/4 groove on an exact grid: kick on every beat, snare on 2 and 4,
+    off-beat hats, and the key's chords changing on each downbeat (the first beat at
+    `first_beat` is a downbeat)."""
+    t = np.arange(int(secs * SR)) / SR
+    beat = 60.0 / bpm
+    rel = t - first_beat
+    y = np.zeros_like(t)
+    on = rel >= 0
+    ph = np.mod(rel, beat)
+    y += on * 0.7 * np.sin(2 * np.pi * 55 * ph) * np.exp(-ph * 30)  # kick
+    beat_n = np.floor(rel / beat).astype(int)
+    snare = on & (np.mod(beat_n, 2) == 1)
+    rng = np.random.default_rng(0)
+    noise = rng.uniform(-1, 1, t.size)
+    y += snare * 0.25 * noise * np.exp(-ph * 40)
+    hat_ph = np.mod(rel - beat / 2, beat)
+    y += on * 0.08 * noise * np.exp(-hat_ph * 120)
+    chords = PROGRESSIONS[key]
+    bar_n = np.floor(rel / (4 * beat)).astype(int)
+    pad = np.zeros_like(t)
+    for i, chord in enumerate(chords):
+        m = on & (np.mod(bar_n, len(chords)) == i)
+        pad[m] = sum(_tone(f, t[m]) for f in chord) / len(chord)
+    return y + 0.25 * pad

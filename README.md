@@ -34,9 +34,21 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
   Party mode will mix out) as text — handy for checking how detection does on real songs.
 - **Genre** from the source's metadata (site genre field, uploader tags, title) — free; AI
   Polish can still label the rest.
-- **Mixes hands-free** with correct transitions: phrase/bar-aligned, **beat-matched**,
-  **equal-power crossfade**, **3-band EQ bass-swap** (incoming enters with lows cut, bass
-  swaps at the midpoint), and a deterministic clean handoff (never leaves a deck muted).
+- **Mixes hands-free like a club DJ** (`frontend/src/mixPlan.js` plans each transition):
+  - **Precise beat grids** (backend, to ~0.01 BPM + downbeat) — beat-matched blends stay within
+    ~1 ms over 32 beats (tested), where whole-BPM tempos would drift ~50 ms (an audible flam).
+  - **Phrasing + drop on the one:** blends are whole phrases (8/16/32 beats) starting on
+    downbeats; the outgoing song leaves as its chorus ends (Party mode) or across its outro, and
+    the incoming song is timed so **its drop lands exactly when the old one is gone** — the
+    overlap sits under the incoming intro, not two choruses at once.
+  - **Style per pair:** long EQ blend (bass cut on the incoming, **bass swap on a bar line**,
+    outgoing loses mids/highs as it leaves); a 2-bar quick blend on a key clash; an **echo-out**
+    (tempo-synced echo tail, incoming drops on the downbeat at its own tempo) when tempos are
+    >8% apart; a plain fade only when there's no reliable beat grid.
+  - **Sample-accurate:** fades, EQ moves, echo and bass swap are scheduled on the audio clock,
+    not JS timers — they land on the beat even in a busy or background tab.
+  - **Tempo glides back:** after a beat-matched handoff the new song returns to its own tempo
+    (and pitch) at ~0.2%/s, so the set never drifts off the songs' real speeds.
 - Manual two-deck + crossfader controls are still there for hands-on mixing — each deck
   shows a **waveform** (click to seek) with a settable **cue** point.
 - **🔒 Key-lock toggle**: pitch-preserving tempo (SoundTouch time-stretch) so beatmatching
@@ -171,9 +183,12 @@ open the link or join:
 - **Ordering** (`frontend/src/ordering.js`): Camelot compatibility + BPM distance (half/double-time
   aware) + an energy-arc cost, greedy from a low-energy opener. `backend/llm_order.py` is the
   optional Claude path (`messages.parse` with a Pydantic schema → validated id order).
-- **Engine** (`frontend/src/audioEngine.js`): each deck = source → 3-band EQ → volume → crossfade →
-  master. Transitions snap to the front deck's next bar, beat-match the incoming deck
-  (`playbackRate`), crossfade equal-power, swap the bass at the midpoint, and snap the handoff clean.
+- **Beat grid** (`backend/beatgrid.py`): onset envelope → coarse tempo by autocorrelation → fine
+  search (0.005 BPM steps) folding the whole song onto each candidate period; downbeat = the beat
+  phase with the most harmonic change. No steady beat → no grid (the mixer fades instead).
+- **Engine** (`frontend/src/audioEngine.js`): each deck = source → 3-band EQ → loudness trim →
+  volume → crossfade → master (+ an echo send). `mixPlan.js` decides style, phrase timing and the
+  drop landing; the engine schedules it on the audio clock and finishes the handoff.
 
 ## Built to run unattended (6-hour set)
 - **Flat memory** — only the current + next track are decoded (~3 buffers); played tracks are freed,
@@ -202,8 +217,8 @@ open the link or join:
   steps good ordering produces). Flip **🔒 Key-lock** on for pitch-preserving time-stretch
   (SoundTouch). Key-lock is a **manual-deck** feature — the hands-free auto-mixer forces it off,
   since SoundTouch's main-thread ScriptProcessor isn't suited to an unattended multi-hour set.
-- **Phrasing is a 4/4 bar grid** off the detected beat offset (true downbeat detection isn't reliable
-  in-browser) — great for dance/pop, approximate for free-time music.
+- **Phrasing assumes 4/4 on a steady grid** — right for pop, reggaeton, hip-hop and electronic;
+  live or free-time recordings get no grid and fall back to a fade.
 - **Background tabs:** audio keeps playing, but browsers throttle JS timers, so a *smooth* blend
   can stutter. The set still advances and never stalls — a watchdog finalizes each handoff off the
   audio clock (not a wall-clock timer), a self-heal resumes the front deck if it's ever left stopped,
