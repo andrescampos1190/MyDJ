@@ -34,9 +34,42 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
   Party mode will mix out) as text — handy for checking how detection does on real songs.
 - **Genre** from the source's metadata (site genre field, uploader tags, title) — free; AI
   Polish can still label the rest.
-- **Mixes hands-free** with correct transitions: phrase/bar-aligned, **beat-matched**,
-  **equal-power crossfade**, **3-band EQ bass-swap** (incoming enters with lows cut, bass
-  swaps at the midpoint), and a deterministic clean handoff (never leaves a deck muted).
+- **Mixes hands-free like a club DJ** (`frontend/src/mixPlan.js` plans each transition):
+  - **Precise beat grids** (backend, to ~0.01 BPM + downbeat) — beat-matched blends stay within
+    ~1 ms over 32 beats (tested), where whole-BPM tempos would drift ~50 ms (an audible flam).
+  - **Phrasing + drop on the one:** blends are whole phrases (8/16/32 beats) starting on
+    downbeats; the outgoing song leaves as its chorus ends (Party mode) or across its outro, and
+    the incoming song is timed so **its drop lands exactly when the old one is gone** — the
+    overlap sits under the incoming intro, not two choruses at once.
+  - **Style per pair** (shown in Now Playing, e.g. "8-bar blend into the drop"):
+    - **EQ blend** — bass cut on the incoming, **bass swap on a bar line**, outgoing loses
+      mids/highs as it leaves. Two singers never overlap: with both songs split into stems the
+      **vocals swap on a bar line** (below); otherwise two vocal songs blend at most 4 bars.
+    - **Filter sweep** — on a genre change, a big energy jump or a key clash: the incoming comes
+      in high-passed and opens up while the outgoing is low-passed away.
+    - **Double drop** — two electronic tracks in compatible keys and near-equal tempos: both
+      drops hit on the same downbeat, then the old track leaves 4 bars later.
+    - **Cut on the one** — a vocal track with no intro to blend over: the outgoing's last beat
+      feeds a short echo and the new song slams in on the downbeat.
+    - **Echo out** — tempos >8% apart: tempo-synced echo tail, the incoming drops on the
+      downbeat at its own tempo.
+    - **Fade** — only when there's no reliable beat grid.
+  - **Vocal stems + vocal swap:** each added song is split into vocals + instrumental in the
+    background (an MDX-Net vocal model run with onnxruntime — ~1 min per song on a laptop CPU;
+    the queue shows "🎤 splitting vocals 40%"). The mixer then knows exactly where each song's
+    vocals are, and the decks play the two stems sample-locked, so mid-blend the outgoing
+    vocal drops out on the bar line where the incoming singer comes in. A song can be played
+    before it's split — until then the mixer goes by its genre.
+  - **Intro loop:** a song whose intro is too short to blend over (e.g. 2 bars before the drop)
+    gets its intro looped, on the beat, until the drop is due.
+  - **Key shift:** when two neighbours' keys clash and a one-semitone move fixes it (+1 semitone
+    = +7 on the Camelot wheel), the incoming song is pitched ±1 semitone — the backend renders the
+    copy with ffmpeg's Rubber Band filter (formants preserved), so the tempo and beat grid don't
+    move. Without Rubber Band in your ffmpeg build it falls back to a plain resample.
+  - **Sample-accurate:** fades, EQ moves, echo and bass swap are scheduled on the audio clock,
+    not JS timers — they land on the beat even in a busy or background tab.
+  - **Tempo glides back:** after a beat-matched handoff the new song returns to its own tempo
+    (and pitch) at ~0.2%/s, so the set never drifts off the songs' real speeds.
 - Manual two-deck + crossfader controls are still there for hands-on mixing — each deck
   shows a **waveform** (click to seek) with a settable **cue** point.
 - **🔒 Key-lock toggle**: pitch-preserving tempo (SoundTouch time-stretch) so beatmatching
@@ -45,7 +78,9 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
 ## Prerequisites
 Python 3.12+ · ffmpeg + ffprobe on PATH · Node 20.19+ (or 22.12+)
 Python deps: `fastapi`, `uvicorn`, `yt-dlp`, `deno` (the JS runtime yt-dlp needs for
-YouTube), `numpy`, `scipy`, `anthropic` (see `backend/requirements.txt`).
+YouTube), `numpy`, `scipy`, `onnxruntime` (vocal separation), `anthropic` (see
+`backend/requirements.txt`). The vocal model (~65 MB) downloads into `backend/models/` the
+first time a song is split; separating takes ~1.5 GB of RAM while it runs.
 Node deps: `react`, `vite`, `web-audio-beat-detector`, `soundtouchjs` (key-lock),
 `essentia.js` (key detection — AGPL-3.0, fine for local/personal use).
 
@@ -104,7 +139,8 @@ cd backend && venv/bin/python -m pytest          # Windows: venv\Scripts\python.
 npm run lint --prefix frontend && npm test --prefix frontend
 
 # browser end-to-end: starts backend + frontend + a local media server, adds tracks,
-# orders them, starts a set, and checks audio plays and auto-transitions to track 2
+# orders them, starts a set, and checks audio plays and auto-transitions to track 2 — plus
+# each transition style (beat alignment measured against the test songs' true grids)
 cd frontend && npx playwright install chromium && npm run test:e2e
 ```
 Real YouTube/SoundCloud downloads are covered by `backend/tests/test_live.py`, which only
@@ -112,23 +148,27 @@ runs with `MYDJ_LIVE=1` (it needs internet). GitHub Actions (`.github/workflows/
 all of the above on every push, plus a Docker build check and the live tests.
 
 ## How to use
-1. Paste track URLs into the **Playlist** box → **+ Add** (each is downloaded + analyzed; you'll
-   see its BPM / Camelot key / energy / genre chips). With **🪄 Auto-order** on, each lands in its
-   best spot automatically.
+The screen is laid out for a hands-free set: **Now Playing** on top, the **Queue** below it,
+**Party session** and **Set options** on the side, and **Manual decks** (two decks, crossfader,
+cue points) folded away at the bottom for mixing by hand.
+1. In the Queue, **search a song by name** (top YouTube results → **+ Add**) or **paste a link**.
+   Each song is downloaded and analyzed (tempo, key, energy, loudness, big parts). With
+   **🪄 Auto-order** on, each lands in its best spot automatically.
 2. Optionally **🎚 Order for Party** (full re-sequence with an energy arc) or **✨ AI Polish**. The
-   badges between tracks show each transition's quality (perfect / good / ok / rough, with BPM%,
-   key-match, energy step).
-3. Set the **Blend** length (toggle **🔁 Loop** if you want it to never end — it wraps back to the
-   start) and hit **▶ Start Set**. It plays through, transitioning automatically; **⏹ Stop** ends it
-   and silences both decks cleanly.
+   line between songs shows each transition's quality (perfect / good / ok / rough).
+3. Hit **▶ Start set** (top right). Now Playing shows the song, a waveform with the mix-out point
+   marked, and "Mixing into *next song* in 0:28". **⏭ Mix now** starts the blend early when the
+   floor gets bored; **■ Stop** ends the set and silences both decks cleanly.
 4. During the set, keep adding songs; use **⏭ Next** / **▲▼** / **✕** to steer the queue. **NOW**
    and **NEXT** tags show what's playing and what's mixing in next.
+5. **Set options:** Blend length, 🪄 Auto-order, 🔥 Party mode, 🔊 Volume match, 🔁 Loop, and
+   📋 Copy song data.
 
 ## Party session (friends add songs and vote from their phones)
 1. Start the app as usual (`.\start.ps1`). The backend and frontend now listen on your home
    network too. **The first time, Windows asks whether to allow Python and Node.js through the
    firewall — allow them on Private networks**, or phones can't connect.
-2. In the app, turn on **📱 Party session**. A QR code and a link like
+2. In the app's **📱 Party session** card, click **Start party session**. A QR code and a link like
    `http://192.168.1.23:5173/guest` appear.
 3. Friends on the **same Wi-Fi** scan the code, type their name once, then:
    - **search** for a song by name (top YouTube results) or **paste a link**, and tap **＋ Add** —
@@ -167,9 +207,17 @@ open the link or join:
 - **Ordering** (`frontend/src/ordering.js`): Camelot compatibility + BPM distance (half/double-time
   aware) + an energy-arc cost, greedy from a low-energy opener. `backend/llm_order.py` is the
   optional Claude path (`messages.parse` with a Pydantic schema → validated id order).
-- **Engine** (`frontend/src/audioEngine.js`): each deck = source → 3-band EQ → volume → crossfade →
-  master. Transitions snap to the front deck's next bar, beat-match the incoming deck
-  (`playbackRate`), crossfade equal-power, swap the bass at the midpoint, and snap the handoff clean.
+- **Beat grid** (`backend/beatgrid.py`): onset envelope → coarse tempo by autocorrelation → fine
+  search (0.005 BPM steps) folding the whole song onto each candidate period; downbeat = the beat
+  phase with the most harmonic change. No steady beat → no grid (the mixer fades instead).
+- **Stems** (`backend/stems.py`): ffmpeg → 44.1 kHz stereo → STFT chunks (~6 s, crossfaded) through
+  the Kim_Vocal_2 MDX-Net model (onnxruntime) → vocal stem; instrumental = mix − vocals, so the
+  two add back up to the song exactly. Vocal segments = where the vocal stem carries a real share
+  of the sound. Runs in a low-priority child process (`StemJobs`), ordered by the playlist.
+- **Engine** (`frontend/src/audioEngine.js`): each deck = source (or instrumental + vocal stems,
+  the vocals through their own gain) → 3-band EQ → loudness trim →
+  volume → crossfade → master (+ an echo send). `mixPlan.js` decides style, phrase timing and the
+  drop landing; the engine schedules it on the audio clock and finishes the handoff.
 
 ## Built to run unattended (6-hour set)
 - **Flat memory** — only the current + next track are decoded (~3 buffers); played tracks are freed,
@@ -198,8 +246,16 @@ open the link or join:
   steps good ordering produces). Flip **🔒 Key-lock** on for pitch-preserving time-stretch
   (SoundTouch). Key-lock is a **manual-deck** feature — the hands-free auto-mixer forces it off,
   since SoundTouch's main-thread ScriptProcessor isn't suited to an unattended multi-hour set.
-- **Phrasing is a 4/4 bar grid** off the detected beat offset (true downbeat detection isn't reliable
-  in-browser) — great for dance/pop, approximate for free-time music.
+- **Vocal separation** runs on the CPU at low priority, one song at a time, in the order the
+  set needs them (~1 min per 3-minute song on a laptop; a busy machine is slower). Songs added
+  right before they play may not be split in time and mix by genre instead. Separation is very
+  good but not perfect: loud backing synths can leak a little into the vocal stem. Set
+  `MYDJ_STEMS=0` to turn it off (e.g. on a low-RAM machine).
+- **Section detection** (chorus/drop boundaries) is loudness-based, refined to the nearest
+  downbeat: right for songs whose big parts are louder; a song that's flat all the way through has
+  no "drop" to land, and blends instead.
+- **Phrasing assumes 4/4 on a steady grid** — right for pop, reggaeton, hip-hop and electronic;
+  live or free-time recordings get no grid and fall back to a fade.
 - **Background tabs:** audio keeps playing, but browsers throttle JS timers, so a *smooth* blend
   can stutter. The set still advances and never stalls — a watchdog finalizes each handoff off the
   audio clock (not a wall-clock timer), a self-heal resumes the front deck if it's ever left stopped,
@@ -222,7 +278,8 @@ blueprint for the backend + static frontend.
    - frontend `VITE_API_URL` = `https://<your-backend>.onrender.com` (baked in at build time)
    - backend `ANTHROPIC_API_KEY` (optional, enables AI Polish)
 3. Backend health-check path is `/api/health`. The free tier (512 MB) may OOM on
-   download+ffmpeg+analysis — move to a paid instance if it does.
+   download+ffmpeg+analysis — move to a paid instance if it does. Vocal separation is off in
+   the Docker image (`MYDJ_STEMS=0`); set `MYDJ_STEMS=1` on an instance with 2+ GB RAM.
 4. **YouTube cookies** (needed for YouTube on Render — see below): on `mydj-backend` →
    Environment → **Secret Files**, add `cookies.txt`. The blueprint already points
    `YTDLP_COOKIES_FILE` at `/etc/secrets/cookies.txt`; without the file it's ignored.
@@ -246,5 +303,5 @@ Cookies expire or get rotated; when YouTube loads start failing again, re-export
 > YouTube cookies). Built for personal use; deploy at your own risk.
 
 ## Stretch ideas
-Stem-based transitions · ML-based energy/danceability · drag-to-reorder · save/record the mix ·
+Acapella / instrumental mash-ups from the stems · ML-based energy/danceability · drag-to-reorder · save/record the mix ·
 hot cues (multiple cue points) · Rubberband/Superpowered for higher-quality key-lock.

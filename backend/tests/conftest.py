@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Must be set before `downloader` is imported: the app wipes this dir on startup,
 # so tests never touch a developer's real backend/downloads/.
 os.environ["MYDJ_DOWNLOAD_DIR"] = tempfile.mkdtemp(prefix="mydj-test-downloads-")
+# Vocal separation takes ~a minute per song: off, except in the tests that turn it on.
+os.environ.setdefault("MYDJ_STEMS", "0")
 
 from audio_fixtures import PROGRESSIONS, progression, write_audio  # noqa: E402
 

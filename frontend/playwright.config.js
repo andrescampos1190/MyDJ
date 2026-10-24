@@ -12,6 +12,10 @@ const python =
 const API_PORT = 8765;
 const WEB_PORT = 5175;
 const MEDIA_PORT = 9765;
+// A second app + backend with vocal separation on, for the stems test only (separating
+// every song the other tests load would just burn CPU).
+const STEMS_API_PORT = 8766;
+const STEMS_WEB_PORT = 5176;
 
 export default defineConfig({
   testDir: "e2e",
@@ -29,6 +33,16 @@ export default defineConfig({
       env: {
         ALLOWED_ORIGINS: `http://localhost:${WEB_PORT}`,
         MYDJ_DOWNLOAD_DIR: path.join(os.tmpdir(), "mydj-e2e-downloads"),
+        MYDJ_STEMS: "0",
+      },
+    },
+    {
+      command: `"${python}" -m uvicorn main:app --app-dir ../backend --port ${STEMS_API_PORT}`,
+      url: `http://127.0.0.1:${STEMS_API_PORT}/api/health`,
+      env: {
+        ALLOWED_ORIGINS: `http://localhost:${STEMS_WEB_PORT}`,
+        MYDJ_DOWNLOAD_DIR: path.join(os.tmpdir(), "mydj-e2e-stems-downloads"),
+        MYDJ_STEMS: "1",
       },
     },
     {
@@ -40,7 +54,12 @@ export default defineConfig({
       url: `http://localhost:${WEB_PORT}`,
       env: { VITE_API_URL: `http://127.0.0.1:${API_PORT}` },
     },
+    {
+      command: `npx vite --port ${STEMS_WEB_PORT} --strictPort`,
+      url: `http://localhost:${STEMS_WEB_PORT}`,
+      env: { VITE_API_URL: `http://127.0.0.1:${STEMS_API_PORT}` },
+    },
   ],
 });
 
-export { API_PORT, MEDIA_PORT };
+export { API_PORT, MEDIA_PORT, STEMS_WEB_PORT };

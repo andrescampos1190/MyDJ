@@ -17,8 +17,15 @@ jobs:
           cache-dependency-path: backend/requirements*.txt
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      # The vocal-separation model (~65 MB, downloaded on first use).
+      - uses: actions/cache@v4
+        with:
+          path: backend/models
+          key: stem-model-kim-vocal-2
       - run: python -m pytest -v
         working-directory: backend
+        env:
+          MYDJ_REQUIRE_STEMS: "1" # fail, don't skip, if the model can't be had
 
   frontend:
     runs-on: ubuntu-latest
@@ -52,6 +59,11 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       # Same layout as local dev: playwright.config.js starts backend/venv's python.
       - run: python -m venv backend/venv && backend/venv/bin/pip install -r backend/requirements.txt
+      # The vocal-separation model (~65 MB, downloaded on first use).
+      - uses: actions/cache@v4
+        with:
+          path: backend/models
+          key: stem-model-kim-vocal-2
       - run: npm ci && npx playwright install --with-deps chromium
         working-directory: frontend
       - run: npx playwright test

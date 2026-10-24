@@ -6,13 +6,16 @@ import { guess } from "web-audio-beat-detector";
 import { PitchShifter } from "soundtouchjs";
 import { detectKey } from "./keyDetect";
 import { matchGainDb, partyMixOut } from "./mixPoints";
+import { describePlan, planTransition } from "./mixPlan";
 import { API } from "./api";
-import { bestInsertIndex, bpmDistance, orderForParty, transitionQuality, voteOrder } from "./ordering";
+import { bestInsertIndex, orderForParty, transitionQuality, voteOrder } from "./ordering";
 
 export { API };
 const AUDIO_CACHE = "mydj-audio-v1"; // compressed audio kept client-side: playback survives a backend restart
 const SESSION_KEY = "mydj-session-v1"; // playlist + position: a tab/browser crash is recoverable
 const DROP_AT = -3; // party session: net votes at which a queued song is dropped
+const TRIGGER_AHEAD = 1; // s before a planned transition that it gets scheduled
+const RATE_STEP = 0.0005; // per 250 ms tick: tempo glide back to a song's own speed
 
 // Best-effort client-side cache of a track's compressed audio (Cache API). Makes
 // mid-set re-decode backend-independent + instant, and lets a reload resume the set.
@@ -68,6 +71,17 @@ async function apiFetch(url, opts) {
   }
 }
 
+// Set an AudioParam right now, dropping anything scheduled on it.
+function setNow(param, v) {
+  param.cancelScheduledValues(0);
+  param.value = v;
+}
+
+// Equal-power fade curves for AudioParam.setValueCurveAtTime.
+const CURVE_N = 64;
+const FADE_IN = new Float32Array(CURVE_N).map((_, i) => Math.sin((i / (CURVE_N - 1)) * 0.5 * Math.PI));
+const FADE_OUT = new Float32Array(CURVE_N).map((_, i) => Math.cos((i / (CURVE_N - 1)) * 0.5 * Math.PI));
+
 // ---- One deck (a single playable track) --------------------------------------
 class Deck {
   constructor(ctx, destination, id, engine) {
@@ -89,15 +103,46 @@ class Deck {
     this.eqHigh = ctx.createBiquadFilter();
     this.eqHigh.type = "highshelf";
     this.eqHigh.frequency.value = 4000;
+    // Sweepable filter for filter-sweep transitions (wide open = transparent).
+    this.filter = ctx.createBiquadFilter();
+    this.filter.type = "lowpass";
+    this.filter.frequency.value = ctx.sampleRate / 2;
+    // With stems loaded, the vocal stem plays through this gain beside the instrumental
+    // (which goes straight in): 1 = in the mix, 0 = out (a vocal swap).
+    this.vox = ctx.createGain();
+    this.vox.connect(this.eqLow);
     this.eqLow.connect(this.eqMid);
     this.eqMid.connect(this.eqHigh);
-    this.eqHigh.connect(this.trim);
+    this.eqHigh.connect(this.filter);
+    this.filter.connect(this.trim);
     this.trim.connect(this.gain);
 
     this.gain.connect(this.fade);
     this.fade.connect(destination); // -> master
 
-    this.buffer = null;
+    // Echo-out: a tempo-synced delay tapped before the crossfader and sent straight to
+    // the master, so its tail keeps ringing after this deck is faded out. Repeats run
+    // through a high-pass, so each one gets thinner, like a DJ mixer's echo.
+    this.echoSend = ctx.createGain();
+    this.echoSend.gain.value = 0;
+    this.echoDelay = ctx.createDelay(4);
+    this.echoHp = ctx.createBiquadFilter();
+    this.echoHp.type = "highpass";
+    this.echoHp.frequency.value = 300;
+    this.echoFeedback = ctx.createGain();
+    this.echoFeedback.gain.value = 0;
+    this.echoOut = ctx.createGain();
+    this.echoOut.gain.value = 0.8;
+    this.gain.connect(this.echoSend);
+    this.echoSend.connect(this.echoDelay);
+    this.echoDelay.connect(this.echoHp);
+    this.echoHp.connect(this.echoFeedback);
+    this.echoFeedback.connect(this.echoDelay);
+    this.echoHp.connect(this.echoOut);
+    this.echoOut.connect(destination);
+
+    this.buffer = null; // the song — or, with stems, its instrumental
+    this.vocals = null; // the vocal stem (AudioBuffer), when playing as stems
     this.meta = null; // { title, duration, thumbnail, uploader, bpm, offset }
     this.baseBpm = null; // detected BPM at playbackRate 1
     this.source = null;
@@ -114,10 +159,14 @@ class Deck {
     this.onEnded = null;
   }
 
-  load(buffer, meta) {
+  // `keyShift`: the buffer is the track moved this many semitones (to fit the key).
+  // `vocals`: the vocal stem, when `buffer` is the instrumental (they play together).
+  load(buffer, meta, keyShift = 0, vocals = null) {
     this.stop();
     this.buffer = buffer;
+    this.vocals = vocals;
     this.meta = meta;
+    this.keyShift = keyShift;
     this.baseBpm = meta?.bpm ?? null;
     this.playbackRate = 1;
     this._startOffset = 0;
@@ -142,6 +191,12 @@ class Deck {
       return Math.min(Math.max(0, t), this.buffer.duration);
     }
     if (!this.isPlaying) return this._startOffset;
+    const lp = this._loop;
+    if (lp && this.ctx.currentTime < lp.until) {
+      // Still going round the looped intro bars.
+      const into = Math.max(0, this.ctx.currentTime - lp.when) * this.playbackRate;
+      return lp.start + (into % lp.len);
+    }
     // Clamp elapsed to >=0: a beat-aligned start can be scheduled slightly in the
     // future, which would otherwise make position() read before _startOffset.
     const elapsed = Math.max(0, this.ctx.currentTime - this._startCtxTime) * this.playbackRate;
@@ -153,11 +208,12 @@ class Deck {
     return (this.buffer.duration - this.position()) / this.playbackRate; // real seconds
   }
 
-  _makeSource() {
+  _makeSource(buffer = this.buffer, dest = this.eqLow) {
     const src = this.ctx.createBufferSource();
-    src.buffer = this.buffer;
+    src.buffer = buffer;
     src.playbackRate.value = this.playbackRate;
-    src.connect(this.eqLow);
+    src.connect(dest);
+    if (buffer !== this.buffer) return src; // the vocal stem follows the main source
     src.onended = () => {
       if (src === this.source && this.isPlaying) {
         this.isPlaying = false;
@@ -174,16 +230,45 @@ class Deck {
     if (!this.buffer || this.isPlaying) return;
     const offset = fromOffset != null ? fromOffset : this._startOffset;
     const when = atCtxTime != null ? atCtxTime : this.ctx.currentTime;
-    if (this.engine && this.engine.keyLock) {
+    if (this.engine && this.engine.keyLock && !this.vocals) {
       this._playKeyLock(Math.max(0, offset), when);
     } else {
       const src = this._makeSource();
       src.start(when, Math.max(0, offset));
       this.source = src;
+      if (this.vocals) {
+        // Same start time and offset on the audio clock: the stems stay sample-locked.
+        this._voxSrc = this._makeSource(this.vocals, this.vox);
+        this._voxSrc.start(when, Math.max(0, offset));
+      }
       this._startCtxTime = when;
       this._startOffset = offset;
     }
     this.isPlaying = true;
+  }
+
+  // Start at `when` by going round [loop.start, loop.start + loop.len) `loop.count`
+  // times, then carry on from loop.start into the song — a DJ looping a short intro to
+  // make room for a blend. Both sources run on the audio clock, so the seam is exact.
+  playLooped(when, loop) {
+    if (!this.buffer || this.isPlaying) return;
+    const until = when + (loop.count * loop.len) / this.playbackRate;
+    this.play(until, loop.start); // the song itself, after the loop passes
+    this._loopSrcs = [[this.buffer, this.eqLow], ...(this.vocals ? [[this.vocals, this.vox]] : [])].map(
+      ([buffer, dest]) => {
+        const src = this.ctx.createBufferSource();
+        src.buffer = buffer;
+        src.loop = true;
+        src.loopStart = loop.start;
+        src.loopEnd = loop.start + loop.len;
+        src.playbackRate.value = this.playbackRate;
+        src.connect(dest);
+        src.start(when, loop.start);
+        src.stop(until);
+        return src;
+      }
+    );
+    this._loop = { when, until, start: loop.start, len: loop.len };
   }
 
   // Pitch-preserving playback via SoundTouch. There's no start(when), so for a
@@ -243,6 +328,17 @@ class Deck {
   }
 
   stop() {
+    for (const src of [...(this._loopSrcs || []), this._voxSrc]) {
+      try {
+        src?.stop();
+        src?.disconnect();
+      } catch {
+        /* already done */
+      }
+    }
+    this._loopSrcs = null;
+    this._voxSrc = null;
+    this._loop = null;
     if (this.source) {
       try {
         this.source.onended = null;
@@ -292,15 +388,25 @@ class Deck {
     this.gain.gain.value = v; // direct write (reliable; scheduling proved flaky)
   }
 
-  // EQ in dB: 0 = flat, -40 ≈ kill. Direct writes (scheduling proved flaky).
+  // EQ in dB: 0 = flat, -40 ≈ kill. A direct write cancels anything a transition
+  // scheduled on that band (scheduled moves + later direct writes don't mix).
   setEq(band, db) {
     const node = band === "low" ? this.eqLow : band === "mid" ? this.eqMid : this.eqHigh;
-    node.gain.value = db;
+    setNow(node.gain, db);
   }
+  // All tone controls back to flat: EQ and the sweep filter (and the vocals back in).
   resetEq() {
-    this.eqLow.gain.value = 0;
-    this.eqMid.gain.value = 0;
-    this.eqHigh.gain.value = 0;
+    setNow(this.vox.gain, 1);
+    setNow(this.eqLow.gain, 0);
+    setNow(this.eqMid.gain, 0);
+    setNow(this.eqHigh.gain, 0);
+    this.filter.type = "lowpass";
+    setNow(this.filter.frequency, this.ctx.sampleRate / 2);
+  }
+  // Cut the echo send and its tail (on Stop).
+  killEcho() {
+    setNow(this.echoSend.gain, 0);
+    setNow(this.echoFeedback.gain, 0);
   }
 
   // Change tempo while keeping the playhead continuous.
@@ -316,6 +422,7 @@ class Deck {
         this._startOffset = pos;
         this._startCtxTime = this.ctx.currentTime;
         this.source.playbackRate.value = rate;
+        if (this._voxSrc) this._voxSrc.playbackRate.value = rate;
       }
     }
     this.playbackRate = rate;
@@ -349,6 +456,8 @@ export class Engine {
     this._ensure();
     this.auto = new AutoMix(this); // hands-free auto-mixer (defined below)
     this._restoreSession(); // re-hydrate a previous (possibly interrupted) set
+    this._stemOrder = "";
+    setInterval(() => this._pollStems(), 3000); // follow background vocal separation
   }
 
   _ensure() {
@@ -393,7 +502,7 @@ export class Engine {
     try {
       const playlist = this.playlist.map((t) => {
         // eslint-disable-next-line no-unused-vars -- destructured only to strip the un-serializable bits
-        const { buffer, _decoding, ...meta } = t;
+        const { buffer, vocalsBuffer, _decoding, ...meta } = t;
         return meta;
       });
       if (!playlist.length) {
@@ -520,14 +629,21 @@ export class Engine {
     const arr = await audioRes.arrayBuffer();
     const buffer = await this.ctx.decodeAudioData(arr);
 
+    // Tempo + downbeat: the backend's precise beat grid (to ~0.01 BPM — needed for
+    // drift-free beat-matching); the in-browser detector is the fallback.
     let bpm = null;
     let offset = 0;
-    try {
-      const g = await guess(buffer); // { bpm, offset }
-      bpm = Math.round(g.bpm);
-      offset = g.offset;
-    } catch {
-      /* tempo not detectable — leave null */
+    if (meta.grid?.bpm) {
+      bpm = meta.grid.bpm;
+      offset = meta.grid.downbeat;
+    } else {
+      try {
+        const g = await guess(buffer); // { bpm, offset }
+        bpm = g.bpm; // unrounded: a whole-BPM tempo drifts audibly over a blend
+        offset = g.offset;
+      } catch {
+        /* tempo not detectable — leave null */
+      }
     }
     // Refine the key with essentia.js (more accurate than the backend K-S fallback,
     // especially major vs minor). Falls back to the backend key if it fails.
@@ -601,6 +717,7 @@ export class Engine {
         id: t.id,
         title: t.title,
         uploader: t.uploader ?? null,
+        thumbnail: t.thumbnail ?? null,
         addedBy: t.addedBy ?? null,
         camelot: t.camelot ?? null,
         bpm: t.bpm ?? null,
@@ -609,12 +726,15 @@ export class Engine {
     const a = this.auto;
     const [lo, hi] = this._upcomingRange();
     const upcoming = this.playlist.slice(lo, hi).map(brief);
-    if (!a.active) return { playing: false, now: null, next: null, upcoming };
+    const info = a.nowInfo();
+    if (!info) return { playing: false, now: null, next: null, upcoming };
     return {
       playing: true,
-      now: brief(this.playlist[a.idx]),
-      next: a._hasNext() ? brief(this.playlist[a._nextIdx()]) : null,
+      now: brief(info.track),
+      next: brief(info.next),
       upcoming,
+      // phones animate the progress bar between syncs from this
+      progress: { pos: info.pos, dur: info.dur, mixAt: info.mixAt, mixing: info.transitioning },
     };
   }
 
@@ -663,6 +783,7 @@ export class Engine {
         url: t.url,
         duration: dur,
         bpm: t.bpm,
+        grid: t.grid ?? null, // {bpm, beat, downbeat, confidence} from the backend
         key: t.key,
         camelot: t.camelot,
         energy: t.energy,
@@ -674,6 +795,8 @@ export class Engine {
         bigParts: t.bigParts ?? null,
         partyMixOut: partyMixOut(t.bigParts, dur, { blend }),
         loudness: t.loudness ?? null, // smoothed dB per second
+        stems: t.stems ?? null, // vocal separation: queued | running | done | ...
+        vocals: t.vocals ?? null, // [[start, end], ...] where the vocals are
       };
     });
   }
@@ -707,30 +830,101 @@ export class Engine {
     });
   }
 
-  // Decode a playlist track's audio on demand (we don't keep ~90 buffers in RAM).
-  ensureDecoded(track) {
+  // ---- Stems: vocal / instrumental separation (runs on the backend, in the background)
+  // A separated song plays as its two stems (the auto-mixer can then swap vocals).
+  wantsStems(track) {
+    return track?.stems === "done" && !track._noStems;
+  }
+  _stemUrls(track) {
+    return ["inst", "vocals"].map((part) => `${API}/api/stems/${track.id}/${part}`);
+  }
+  // Follow separation progress, and have the backend separate songs in play order.
+  async _pollStems() {
+    const busy = (t) => t.stems === "queued" || t.stems === "running";
+    const from = this.auto.active ? this.auto.idx : 0;
+    const pending = [...this.playlist.slice(from), ...this.playlist.slice(0, from)].filter(busy);
+    if (!pending.length) return;
+    const ids = pending.map((t) => t.id);
+    try {
+      if (ids.join() !== this._stemOrder) {
+        this._stemOrder = ids.join();
+        await apiFetch(`${API}/api/stems/order`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids }),
+        });
+      }
+      const res = await apiFetch(`${API}/api/stems?ids=${ids.join(",")}`);
+      if (!res.ok) return;
+      const status = await res.json();
+      let changed = false;
+      for (const t of pending) {
+        const st = status[t.id];
+        if (!st || (st.status === t.stems && st.progress === t.stemProgress)) continue;
+        t.stems = st.status;
+        t.stemProgress = st.progress ?? 0;
+        if (st.status === "done") t.vocals = st.vocals;
+        changed = true;
+      }
+      if (changed) {
+        this._saveSoon();
+        this.emit();
+      }
+    } catch {
+      /* backend unreachable — try again next round */
+    }
+  }
+
+  // Decode a playlist track's audio on demand (we don't keep ~90 buffers in RAM): its
+  // two stems once it's separated, else the song — optionally key-shifted by `shift`
+  // semitones (rendered by the backend).
+  ensureDecoded(track, shift = 0) {
     if (!track) return Promise.resolve(null);
-    if (track.buffer) return Promise.resolve(track.buffer);
-    if (!track._decoding) {
-      track._decoding = (async () => {
-        const bytes = await fetchAudioBytes(`${API}${track.audioUrl}`); // client cache first
-        const buf = await this.ctx.decodeAudioData(bytes);
-        track.buffer = buf;
+    const key = `${shift}:${this.wantsStems(track)}`;
+    if (track.buffer && track._decodedKey === key) return Promise.resolve(track.buffer);
+    if (!track._decoding || track._decodingKey !== key) {
+      const q = shift ? `?semitones=${shift}` : "";
+      // client cache first
+      const get = async (url) => this.ctx.decodeAudioData(await fetchAudioBytes(url + q));
+      const job = (async () => {
+        let buf = null;
+        let vocals = null;
+        if (this.wantsStems(track)) {
+          try {
+            [buf, vocals] = await Promise.all(this._stemUrls(track).map(get));
+          } catch {
+            track._noStems = true; // gone (e.g. the backend restarted): play the song itself
+          }
+        }
+        if (!buf) buf = await get(`${API}${track.audioUrl}`);
+        if (track._decoding === job) {
+          track.buffer = buf;
+          track.vocalsBuffer = vocals;
+          track.bufferShift = shift;
+          track._decodedKey = `${shift}:${!!vocals}`;
+        }
         return buf;
       })().finally(() => {
-        track._decoding = null;
+        if (track._decoding === job) track._decoding = null;
       });
+      track._decoding = job;
+      track._decodingKey = key;
     }
     return track._decoding;
   }
   freeDecoded(track) {
-    if (track) track.buffer = null;
+    if (track) {
+      track.buffer = null;
+      track.vocalsBuffer = null;
+      track.bufferShift = 0;
+      track._decodedKey = null;
+    }
   }
   removeTrack(id) {
     const t = this.playlist.find((x) => x.id === id);
     if (!t || this.isLocked(id)) return false;
     const ok = this._reorder((list) => list.splice(list.indexOf(t), 1));
-    if (ok) evictAudio(`${API}${t.audioUrl}`);
+    if (ok) for (const url of [`${API}${t.audioUrl}`, ...this._stemUrls(t)]) evictAudio(url);
     return ok;
   }
   clearPlaylist() {
@@ -831,14 +1025,12 @@ export class Engine {
   // scheduling (setValueAtTime/setTargetAtTime) proved unreliable — a param could
   // wedge and ignore scheduled events — whereas direct writes always apply.
   _setFadeGains(x) {
-    this.deckA.fade.gain.value = Math.cos(x * 0.5 * Math.PI);
-    this.deckB.fade.gain.value = Math.cos((1 - x) * 0.5 * Math.PI);
+    setNow(this.deckA.fade.gain, Math.cos(x * 0.5 * Math.PI));
+    setNow(this.deckB.fade.gain, Math.cos((1 - x) * 0.5 * Math.PI));
   }
   _stopXfRamp() {
-    if (this._xfTimer) {
-      clearInterval(this._xfTimer);
-      this._xfTimer = null;
-    }
+    clearInterval(this._xfVis); // the slider's follow-the-fade animation
+    this._xfVis = null;
   }
   applyCrossfade(x) {
     this._stopXfRamp();
@@ -850,27 +1042,6 @@ export class Engine {
     this.applyCrossfade(this.crossfade);
     this.emit();
   }
-  // Smoothly ramp the crossfader to `target` over `seconds` (JS-timed).
-  rampCrossfade(target, seconds) {
-    this._ensure();
-    this._stopXfRamp();
-    const from = this.crossfade;
-    const start = performance.now();
-    const durMs = Math.max(1, seconds * 1000);
-    this._xfTimer = setInterval(() => {
-      const f = Math.min(1, (performance.now() - start) / durMs);
-      const x = from + (target - from) * f;
-      this._setFadeGains(x);
-      this.crossfade = x;
-      if (f >= 1) {
-        this._stopXfRamp();
-        this.crossfade = target;
-        this._setFadeGains(target);
-        this.emit();
-      }
-    }, 30);
-  }
-
   // ---- Beat sync ----
   // Match `which` deck's tempo (and, if a reference beat is given, phase) to the
   // other deck. Returns the ctx time of the other deck's next beat (for aligned starts).
@@ -919,112 +1090,132 @@ export class Engine {
     this.emit();
   }
 
-  // Phrase-aligned, beat-matched transition with an EQ bass-swap. The incoming
-  // deck starts on the front deck's next bar with its lows cut, the volume
-  // crossfades equal-power, and the bass is swapped at the midpoint so two
-  // basslines never clash. Returns the total seconds until the handoff completes.
-  startTransition(fromFront, back, secs) {
+  // Run a transition plan (see mixPlan.js) on the audio clock: every fade, EQ move,
+  // echo and the bass swap is scheduled sample-accurately, so it lands exactly on the
+  // beat even if the tab is busy or in the background. (Only finishing the handoff
+  // afterwards runs on a timer.) Returns seconds until the handoff completes.
+  startTransition(fromFront, backId, plan) {
     const txn = ++this._txn; // any timer tagged with an older txn is now stale
     const front = this.deck(fromFront);
-    const inc = this.deck(back);
+    const inc = this.deck(backId);
+    const now = this.ctx.currentTime;
+    const fr = front.playbackRate || 1;
+    // Track time -> audio-clock time on the outgoing deck.
+    const tS = now + Math.max(0.05, (plan.outStart - front.position()) / fr);
+    const tE = tS + Math.max(0.05, (plan.outEnd - plan.outStart) / fr);
 
-    // Boundary-aware: too big a tempo gap to beat-match (or a genre change with a
-    // real gap) -> clean cut instead of force-stretching.
-    const gap = bpmDistance(front.baseBpm, inc.baseBpm);
-    const genreChange =
-      front.meta?.genre && inc.meta?.genre && front.meta.genre !== inc.meta.genre;
-    if (gap > 0.08 || (genreChange && gap > 0.04)) {
-      return this._cutTransition(fromFront, back, txn);
+    this._stopXfRamp();
+    for (const d of [front, inc]) {
+      d.resetEq();
+      for (const p of [d.eqLow.gain, d.eqMid.gain, d.eqHigh.gain]) p.setValueAtTime(0, now);
     }
+    setNow(front.fade.gain, 1);
+    setNow(inc.fade.gain, 0);
+    front.fade.gain.setValueAtTime(1, now);
+    inc.fade.gain.setValueAtTime(0, now);
+    inc.setPlaybackRate(plan.incRate);
 
-    // Beat-match the incoming deck to the front deck's effective tempo.
-    if (front.baseBpm && inc.baseBpm) {
-      inc.setPlaybackRate((front.baseBpm * front.playbackRate) / inc.baseBpm);
-    }
-    const beatReal = front.baseBpm ? 60 / front.baseBpm / front.playbackRate : 0.5;
+    // The incoming song starts on its downbeat — first going round its looped intro
+    // bars when the plan needs more room than its intro has.
+    const startInc = (when) =>
+      plan.loop ? inc.playLooped(when, plan.loop) : inc.play(when, plan.inStart);
 
-    // Snap the blend to whole bars (8–32 beats).
-    let blendBeats = Math.round(secs / beatReal / 4) * 4;
-    blendBeats = Math.max(8, Math.min(32, blendBeats || 16));
-    const blendReal = blendBeats * beatReal;
-
-    // Start the incoming track on the front deck's next bar, entering with lows
-    // (and some mids) cut so the basslines don't collide (intro-under-outro).
-    const startAt =
-      front.baseBpm && front.isPlaying ? this.nextBarTime(fromFront) : this.ctx.currentTime;
-
-    // Start the incoming track at its first drop (skip a long/quiet intro), snapped
-    // to its own bar grid so it stays beat-aligned with the front deck.
-    let inOffset = inc.meta?.introEnd || 0;
-    if (inc.baseBpm) {
-      const bar = (60 / inc.baseBpm) * 4;
-      const o = inc.meta?.offset || 0;
-      inOffset = o + Math.max(0, Math.round((inOffset - o) / bar)) * bar;
+    if (plan.style === "echo" || plan.style === "cut") {
+      // The last beat of the outgoing song feeds a tempo-synced echo, the song stops on
+      // the downbeat, and the incoming one drops in at its own tempo while the echo
+      // rings out. Echo-out: bass rolls off over the last bar, 1-beat repeats. Cut on the
+      // one: just the last beat, quicker half-beat repeats.
+      const beat = 60 / ((front.baseBpm || 120) * fr);
+      const { delayBeats, feedback } = plan.echo || { delayBeats: 1, feedback: 0.5 };
+      setNow(front.echoDelay.delayTime, Math.min(3.9, delayBeats * beat));
+      setNow(front.echoSend.gain, 0);
+      setNow(front.echoFeedback.gain, feedback);
+      front.echoSend.gain.setValueAtTime(0, now);
+      front.echoSend.gain.setValueAtTime(1, tE - beat);
+      front.echoSend.gain.setValueAtTime(0, tE);
+      front.echoFeedback.gain.setValueAtTime(feedback, tE + 4 * beat);
+      front.echoFeedback.gain.linearRampToValueAtTime(0, tE + 8 * beat);
+      if (tE - beat > tS + 0.01) {
+        front.eqLow.gain.setValueAtTime(0, tS);
+        front.eqLow.gain.linearRampToValueAtTime(-40, tE - beat);
+      }
+      front.fade.gain.setValueAtTime(1, tE - 0.02);
+      front.fade.gain.linearRampToValueAtTime(0, tE);
+      inc.fade.gain.setValueAtTime(0, tE);
+      inc.fade.gain.linearRampToValueAtTime(1, tE + 0.03);
+      startInc(tE);
+    } else if (plan.style === "fade") {
+      inc.fade.gain.setValueCurveAtTime(FADE_IN, tS, tE - tS);
+      front.fade.gain.setValueCurveAtTime(FADE_OUT, tS, tE - tS);
+      startInc(tS);
+    } else if (plan.style === "filter") {
+      // Filter sweep: the incoming song opens up out of a high-pass (thin -> full) through
+      // the first half; the outgoing one sinks into a closing low-pass through the second,
+      // its bass swapped out on the bar line as the incoming bass arrives.
+      const sw = tS + (plan.swapBeat / plan.beats) * (tE - tS);
+      const nyq = this.ctx.sampleRate / 2;
+      inc.filter.type = "highpass";
+      setNow(inc.filter.frequency, 1500);
+      inc.filter.frequency.setValueAtTime(1500, tS);
+      inc.filter.frequency.exponentialRampToValueAtTime(20, sw);
+      front.filter.type = "lowpass";
+      setNow(front.filter.frequency, nyq);
+      front.filter.frequency.setValueAtTime(nyq, sw);
+      front.filter.frequency.exponentialRampToValueAtTime(250, tE);
+      front.eqLow.gain.setValueAtTime(0, sw - 0.03);
+      front.eqLow.gain.linearRampToValueAtTime(-40, sw);
+      inc.fade.gain.setValueCurveAtTime(FADE_IN, tS, sw - tS);
+      front.fade.gain.setValueCurveAtTime(FADE_OUT, sw, tE - sw);
+      startInc(tS);
     } else {
-      inOffset = inc.meta?.offset || 0;
+      // Beat-matched EQ blend (also the double drop, whose swap point is both drops):
+      // the incoming song comes up through the first part with its bass cut, the
+      // basslines swap in 30 ms right on a bar line, then the outgoing one goes down
+      // through the rest, losing mids and highs as it leaves.
+      const sw = tS + (plan.swapBeat / plan.beats) * (tE - tS);
+      const X = 0.03;
+      inc.fade.gain.setValueCurveAtTime(FADE_IN, tS, sw - tS);
+      front.fade.gain.setValueCurveAtTime(FADE_OUT, sw, tE - sw);
+      inc.eqLow.gain.setValueAtTime(-40, now);
+      inc.eqLow.gain.setValueAtTime(-40, sw - X);
+      inc.eqLow.gain.linearRampToValueAtTime(0, sw);
+      front.eqLow.gain.setValueAtTime(0, sw - X);
+      front.eqLow.gain.linearRampToValueAtTime(-40, sw);
+      inc.eqMid.gain.setValueAtTime(-6, now);
+      inc.eqMid.gain.setValueAtTime(-6, tS);
+      inc.eqMid.gain.linearRampToValueAtTime(0, sw);
+      front.eqMid.gain.setValueAtTime(0, sw);
+      front.eqMid.gain.linearRampToValueAtTime(-8, tE);
+      front.eqHigh.gain.setValueAtTime(0, sw);
+      front.eqHigh.gain.linearRampToValueAtTime(-6, tE);
+      startInc(tS);
     }
-    inc.setEq("low", -40);
-    inc.setEq("mid", -6);
-    inc.setEq("high", 0);
-    inc.play(startAt, inOffset);
-
-    const startDelay = Math.max(0, startAt - this.ctx.currentTime);
-    setTimeout(() => {
-      if (this._txn === txn) this._runBlend(fromFront, back, blendReal, txn);
-    }, startDelay * 1000);
-    return startDelay + blendReal;
+    // Vocal swap (both decks playing stems): the incoming vocal waits, then the singers
+    // hand over in 30 ms, right on the planned bar line.
+    if (plan.vocalSwap != null && plan.beats && front.vocals && inc.vocals) {
+      const X = 0.03;
+      const at = Math.max(now, tS + (plan.vocalSwap / plan.beats) * (tE - tS) - X);
+      inc.vox.gain.setValueAtTime(0, now);
+      inc.vox.gain.setValueAtTime(0, at);
+      inc.vox.gain.linearRampToValueAtTime(1, at + X);
+      front.vox.gain.setValueAtTime(1, at);
+      front.vox.gain.linearRampToValueAtTime(0, at + X);
+    }
+    this._visualCrossfade(backId === "B" ? 1 : 0, tS, tE, txn);
+    return tE - now;
   }
 
-  _runBlend(fromFront, back, blendReal, txn) {
-    const front = this.deck(fromFront);
-    const inc = this.deck(back);
-    // Equal-power volume crossfade across the blend.
-    this.rampCrossfade(back === "B" ? 1 : 0, blendReal);
-    // Bass swap at the midpoint: cut outgoing lows, open incoming lows + mids.
-    setTimeout(() => {
-      if (this._txn !== txn) return; // a newer transition started — don't touch these decks
-      front.setEq("low", -40);
-      inc.setEq("low", 0);
-      inc.setEq("mid", 0);
-    }, blendReal * 0.5 * 1000);
-    // Leave the outgoing deck's EQ flat again for its next use.
-    setTimeout(() => {
-      if (this._txn === txn) front.resetEq();
-    }, blendReal * 1000 + 80);
-  }
-
-  // Clean phrase cut for big BPM/genre gaps: no force-beatmatch. The incoming
-  // plays at its own tempo, entering at its drop on the outgoing's next bar while
-  // the outgoing is filtered (bass/mids pulled) + faded out fast.
-  _cutTransition(fromFront, back, txn) {
-    const front = this.deck(fromFront);
-    const inc = this.deck(back);
-    inc.setPlaybackRate(1);
-
-    const startAt =
-      front.baseBpm && front.isPlaying ? this.nextBarTime(fromFront) : this.ctx.currentTime;
-    let inOffset = inc.meta?.introEnd || 0;
-    if (inc.baseBpm) {
-      const bar = (60 / inc.baseBpm) * 4;
-      const o = inc.meta?.offset || 0;
-      inOffset = o + Math.max(0, Math.round((inOffset - o) / bar)) * bar;
-    } else {
-      inOffset = inc.meta?.offset || 0;
-    }
-    inc.setEq("low", 0);
-    inc.setEq("mid", 0);
-    inc.setEq("high", 0);
-    inc.play(startAt, inOffset);
-
-    const cutSecs = 2.5;
-    const startDelay = Math.max(0, startAt - this.ctx.currentTime);
-    setTimeout(() => {
-      if (this._txn !== txn) return; // a newer transition started — leave these decks alone
-      front.setEq("low", -40);
-      front.setEq("mid", -18);
-      this.rampCrossfade(back === "B" ? 1 : 0, cutSecs);
-    }, startDelay * 1000);
-    return startDelay + cutSecs;
+  // The crossfader slider follows the scheduled fades (display only — the audio is
+  // already scheduled; this never writes a gain).
+  _visualCrossfade(target, tS, tE, txn) {
+    clearInterval(this._xfVis);
+    const from = this.crossfade;
+    this._xfVis = setInterval(() => {
+      if (this._txn !== txn) return clearInterval(this._xfVis);
+      const f = Math.min(1, Math.max(0, (this.ctx.currentTime - tS) / (tE - tS)));
+      this.crossfade = from + (target - from) * f;
+      if (f >= 1) clearInterval(this._xfVis);
+    }, 100);
   }
 }
 
@@ -1089,17 +1280,30 @@ class AutoMix {
   _backReady() {
     const back = this.engine.other(this.front);
     const t = this.tracks[this._nextIdx()];
-    return !!(t && back.buffer && back.meta && back.meta.id === t.id);
+    if (!(t && back.buffer && back.meta && back.meta.id === t.id)) return false;
+    if (!back.vocals && this.engine.wantsStems(t)) {
+      // Its stems arrived after the song was loaded: switch to them — unless the
+      // transition is too close to wait for the decode (then it mixes as it is).
+      const front = this.engine.deck(this.front);
+      const p = this._planFor(t);
+      if (!p || p.outStart - front.position() > 20 * front.playbackRate) return false;
+    }
+    // ...in the key the transition calls for (a key-shifted copy, if any).
+    return (back.keyShift || 0) === this._keyShiftFor(t);
+  }
+  _keyShiftFor(t) {
+    return this._planFor(t)?.keyShift || 0;
   }
 
   // Load an already-decoded playlist track into a deck.
-  _loadDeck(deckId, idx) {
+  _loadDeck(deckId, idx, shift = 0) {
     const t = this.tracks[idx];
-    if (!t || !t.buffer) return false;
+    if (!t || !t.buffer || (t.bufferShift || 0) !== shift) return false;
+    if (!!t.vocalsBuffer !== this.engine.wantsStems(t)) return false; // stems still decoding
     const deck = this.engine.deck(deckId);
-    if (deck.buffer === t.buffer) return true; // already loaded
+    if (deck.buffer === t.buffer && (deck.keyShift || 0) === shift) return true; // already loaded
     if (deck.isPlaying) return false; // never yank a live deck (throttle-reorder safety)
-    deck.load(t.buffer, t);
+    deck.load(t.buffer, t, shift, t.vocalsBuffer);
     return true;
   }
 
@@ -1108,13 +1312,15 @@ class AutoMix {
   async _prepareAndLoad(deckId, idx) {
     const t = this.tracks[idx];
     if (!t) return;
+    // The next song comes in the key its transition calls for (maybe a shifted copy).
+    const shift = this.active && idx === this._nextIdx() ? this._keyShiftFor(t) : 0;
     try {
-      await this.engine.ensureDecoded(t);
+      await this.engine.ensureDecoded(t, shift);
     } catch {
       t._fails = (t._fails || 0) + 1; // after a few, _nextIdx() skips this track entirely
       return;
     }
-    if (this.active && t.buffer) this._loadDeck(deckId, idx);
+    if (this.active && t.buffer) this._loadDeck(deckId, idx, shift);
     this._freeFar();
   }
 
@@ -1179,7 +1385,17 @@ class AutoMix {
       this._prepareAndLoad(back.id, this._nextIdx()); // not ready (decoding/bad) — _tick retries
       return;
     }
-    this._beginTransition(back, 4); // cut straight into the next track
+    // The song ran out before its planned transition: bring the next one straight in.
+    const pos = deck.position();
+    const next = this.tracks[this._nextIdx()];
+    this._beginTransition(back, {
+      style: "fade",
+      outStart: pos,
+      outEnd: pos + 0.3,
+      inStart: next?.introEnd || 0,
+      incRate: 1,
+      lands: "start",
+    });
   }
 
   stop() {
@@ -1196,6 +1412,8 @@ class AutoMix {
     this.engine.deckB.stop();
     this.engine.deckA.resetEq();
     this.engine.deckB.resetEq();
+    this.engine.deckA.killEcho();
+    this.engine.deckB.killEcho();
     this.engine.setCrossfade(0);
     this.engine.releaseWakeLock();
     this.engine.clearSession(); // intentional stop — nothing to resume
@@ -1235,6 +1453,15 @@ class AutoMix {
     const back = this.engine.other(this.front);
     const hasNext = this._hasNext();
     const ended = !front.isPlaying && front.position() >= front.buffer.duration - 0.05;
+    const plan = hasNext && this._backReady() ? this.plan() : null;
+
+    // After a beat-matched handoff the new song plays at the old one's tempo: glide it
+    // back to its own tempo (and pitch) at ~0.2%/s — slow enough that nobody hears it —
+    // but hold still once its own transition is close (the plan depends on its rate).
+    if (front.isPlaying && front.playbackRate !== 1 && (!plan || plan.outStart - front.position() > 8)) {
+      const r = front.playbackRate;
+      front.setPlaybackRate(Math.abs(1 - r) <= RATE_STEP ? 1 : r + Math.sign(1 - r) * RATE_STEP);
+    }
 
     if (!hasNext) {
       if (ended || front.remaining() <= 0.25) this._finish();
@@ -1244,38 +1471,78 @@ class AutoMix {
       this._prepareAndLoad(back.id, this._nextIdx()); // decode/replace the next track ahead of time
       return;
     }
-    const dur = front.buffer.duration;
-
-    // Mix OUT at the detected outro, but early enough that the blend finishes before
-    // the track ends. Avoid mixing out into a mid-song breakdown (step back to groove).
-    let mixOutAt = front.meta?.outroStart;
-    if (!(mixOutAt > 0)) mixOutAt = dur;
-    mixOutAt = Math.max(1, Math.min(mixOutAt, dur - this.transitionSecs));
-    const curve = front.meta?.energyCurve;
-    if (curve && curve.length) {
-      let ci = Math.max(0, Math.min(curve.length - 1, Math.floor((mixOutAt / dur) * curve.length)));
-      if (curve[ci] < 0.45) {
-        for (let i = ci; i >= 0; i--) {
-          if (curve[i] >= 0.55) {
-            mixOutAt = (i / curve.length) * dur;
-            break;
-          }
-        }
-      }
-    }
-
-    if (this.party) {
-      const p = partyMixOut(front.meta?.bigParts, dur, { blend: this.transitionSecs });
-      if (p != null && p < mixOutAt) mixOutAt = p;
-    }
-
-    if (ended) this._beginTransition(back, 4);
-    else if (front.isPlaying && front.position() >= mixOutAt) this._beginTransition(back, this.transitionSecs);
+    if (ended) this._onEnded(front);
+    // Fire a second early: the transition itself is scheduled to the exact downbeat.
+    else if (front.isPlaying && front.position() >= plan.outStart - TRIGGER_AHEAD * front.playbackRate)
+      this._beginTransition(back, plan);
   }
 
-  _beginTransition(back, secs) {
-    if (!back || !back.buffer) return; // never transition to an empty deck
-    const total = this.engine.startTransition(this.front, back.id, secs);
+  // How the front song will hand over to the next one (see mixPlan.js), or null.
+  plan({ now = false } = {}) {
+    const next = this._hasNext() ? this.tracks[this._nextIdx()] : null;
+    return this._planFor(next, { now });
+  }
+  _planFor(next, { now = false } = {}) {
+    const front = this.engine.deck(this.front);
+    if (!front.buffer || !next || !front.meta) return null;
+    const back = this.engine.other(this.front);
+    const gridOf = (t) => t.grid || (t.bpm ? { bpm: t.bpm, downbeat: t.offset || 0 } : null);
+    return planTransition({
+      out: {
+        ...front.meta,
+        grid: gridOf(front.meta),
+        duration: front.buffer.duration,
+        keyShift: front.keyShift || 0, // the key the floor actually hears
+        stems: !!front.vocals,
+      },
+      inc: {
+        ...next,
+        grid: gridOf(next),
+        duration: next.buffer?.duration || next.duration,
+        stems: back.meta?.id === next.id && !!back.vocals,
+      },
+      pos: front.position(),
+      rate: front.playbackRate,
+      blendSecs: this.transitionSecs,
+      party: this.party,
+      now,
+    });
+  }
+
+  // Seconds into the front track at which the transition into the next one starts.
+  mixOutPoint() {
+    return this.plan()?.outStart ?? null;
+  }
+
+  // The DJ's override: start blending into the next track now (it still lands on a bar).
+  mixNow() {
+    if (!this.active || this._transitioning || !this._backReady()) return false;
+    this._beginTransition(this.engine.other(this.front), this.plan({ now: true }));
+    return true;
+  }
+
+  // What's playing, for the Now Playing view and friends' phones.
+  nowInfo() {
+    if (!this.active) return null;
+    const front = this.engine.deck(this.front);
+    const track = this.tracks[this.idx] || null;
+    const plan = this._transitioning ? this._lastPlan : this._backReady() ? this.plan() : null;
+    return {
+      track,
+      next: this._hasNext() ? this.tracks[this._nextIdx()] : null,
+      pos: front.position(),
+      dur: front.buffer?.duration || track?.duration || 0,
+      mixAt: this._transitioning ? null : (plan?.outStart ?? null),
+      style: describePlan(plan),
+      transitioning: this._transitioning,
+      canMixNow: !this._transitioning && this._backReady(),
+    };
+  }
+
+  _beginTransition(back, plan) {
+    if (!back || !back.buffer || !plan) return; // never transition to an empty deck
+    this._lastPlan = plan;
+    const total = this.engine.startTransition(this.front, back.id, plan);
     this._afterTransition(total);
   }
 

@@ -1,0 +1,11 @@
+.art {
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 10px;
+  background: var(--card-2);
+}
+.art-fallback {
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.85);
+}

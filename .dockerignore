@@ -3,6 +3,7 @@
 **/*.pyc
 backend/venv/
 backend/downloads/
+backend/models/
 backend/.env
 .env
 frontend/

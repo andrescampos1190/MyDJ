@@ -37,7 +37,7 @@ test("add tracks, order them, and auto-mix from one to the next", async ({ page 
     await page.locator(".loadbar button").click();
     const row = page.locator(".tracks li", { hasText: name });
     await expect(row).toBeVisible({ timeout: 60_000 });
-    await expect(row.locator(".chip.key")).toContainText(camelot);
+    await expect(row.locator(".t-meta")).toContainText(camelot);
   }
   await expect(page.locator(".error")).toHaveCount(0);
 
@@ -47,16 +47,16 @@ test("add tracks, order them, and auto-mix from one to the next", async ({ page 
   // 4 s blend on 24 s tracks: mix out at ~20 s, then ~16 s of steady play on track 2.
   // (With the default 16 s blend, track 2 is already past its mix-out point when the
   // handoff completes, so the mixer rightly blends straight on into track 3.)
-  await page.locator(".pl-controls input[type=range]").fill("4");
-  await expect(page.locator(".pl-controls .val")).toHaveText("4s");
-  await page.getByRole("button", { name: /Start Set/ }).click();
+  await page.getByLabel("Blend length").fill("4");
+  await expect(page.locator(".blend .val")).toHaveText("4s");
+  await page.locator(".topbar").getByRole("button", { name: /Start set/ }).click();
 
-  const status = page.locator(".playlist .status");
-  await expect(status).toContainText("playing · 1/3", { timeout: 30_000 });
+  const status = page.locator(".set-status");
+  await expect(status).toContainText("Live · song 1 of 3", { timeout: 30_000 });
   expect(await masterPeak(page)).toBeGreaterThan(0.05);
 
-  await expect(status).toContainText("mixing", { timeout: 30_000 });
-  await expect(status).toContainText("playing · 2/3", { timeout: 30_000 });
+  await expect(status).toContainText("Mixing", { timeout: 30_000 });
+  await expect(status).toContainText("Live · song 2 of 3", { timeout: 30_000 });
   const decks = await page.evaluate(() => ({
     a: window.engine.deckA.isPlaying,
     b: window.engine.deckB.isPlaying,
@@ -65,7 +65,7 @@ test("add tracks, order them, and auto-mix from one to the next", async ({ page 
   expect(await masterPeak(page)).toBeGreaterThan(0.05);
 
   await page.getByRole("button", { name: /Stop/ }).click();
-  await expect(page.getByRole("button", { name: /Start Set/ })).toBeVisible();
+  await expect(page.locator(".topbar").getByRole("button", { name: /Start set/ })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -82,10 +82,10 @@ test("add a song mid-set and make it play next", async ({ page }) => {
   await add("G_major");
   await add("A_minor");
 
-  await page.locator(".pl-controls input[type=range]").fill("4");
-  await page.getByRole("button", { name: /Start Set/ }).click();
-  const status = page.locator(".playlist .status");
-  await expect(status).toContainText("playing · 1/2", { timeout: 30_000 });
+  await page.getByLabel("Blend length").fill("4");
+  await page.locator(".topbar").getByRole("button", { name: /Start set/ }).click();
+  const status = page.locator(".set-status");
+  await expect(status).toContainText("Live · song 1 of 2", { timeout: 30_000 });
   const rows = page.locator(".tracks li");
   const first = (await rows.nth(0).locator(".t-title").textContent()).trim();
   const queuedNext = (await rows.nth(1).locator(".t-title").textContent()).trim();
@@ -104,7 +104,7 @@ test("add a song mid-set and make it play next", async ({ page }) => {
   await expect(rows.nth(2)).toContainText(queuedNext);
 
   // The mixer actually transitions into it.
-  await expect(status).toContainText("playing · 2/3", { timeout: 40_000 });
+  await expect(status).toContainText("Live · song 2 of 3", { timeout: 40_000 });
   await expect(rows.nth(1).locator(".tag.now")).toBeVisible();
   const playing = await page.evaluate(() => {
     const e = window.engine;
@@ -126,25 +126,28 @@ test("party mode mixes out after the big chorus, not at the end", async ({ page 
   }
   const rows = page.locator(".tracks li");
   if (!(await rows.nth(0).textContent()).includes("party_song")) {
-    await rows.nth(1).getByRole("button", { name: "▲" }).click(); // manual reorder
+    await rows.nth(1).getByRole("button", { name: "Move up" }).click(); // manual reorder
   }
   await expect(rows.nth(0)).toContainText("party_song");
-  await expect(page.getByRole("button", { name: /Party mode: ON/ })).toBeVisible();
+  await expect(page.getByRole("switch", { name: /Party mode/ })).toHaveAttribute("aria-checked", "true");
 
-  await page.getByRole("button", { name: /Start Set/ }).click();
-  const status = page.locator(".playlist .status");
-  await expect(status).toContainText("playing · 1/2", { timeout: 30_000 });
+  await page.locator(".topbar").getByRole("button", { name: /Start set/ }).click();
+  const status = page.locator(".set-status");
+  await expect(status).toContainText("Live · song 1 of 2", { timeout: 30_000 });
   // party_song: big chorus 20-75 s, final chorus 90-120 s. Jump near the first one's end.
   await page.evaluate(() => window.engine.seek(window.engine.deckA.isPlaying ? "A" : "B", 50));
 
-  await expect(status).toContainText("mixing", { timeout: 30_000 });
+  await expect(status).toContainText("Mixing", { timeout: 30_000 });
   const pos = await page.evaluate(() => {
     const e = window.engine;
     return [e.deckA, e.deckB].find((d) => d.meta?.title === "party_song").position();
   });
-  // Detected big part ~23-72 s -> blend starts ~64 s, over the chorus's tail...
-  expect(pos).toBeGreaterThan(60);
-  expect(pos).toBeLessThan(75); // ...not ~104 s, where playing it to the end would mix out
+  // The transition finishes as the chorus ends at 75 s (on a downbeat), instead of
+  // mixing out at ~104 s by playing the song to its end.
+  expect(pos).toBeGreaterThan(50);
+  expect(pos).toBeLessThan(75);
+  const outEnd = await page.evaluate(() => window.engine.auto._lastPlan.outEnd);
+  expect(Math.abs(outEnd - 75)).toBeLessThan(1);
   await page.getByRole("button", { name: /Stop/ }).click();
 });
 
@@ -175,12 +178,12 @@ test("volume match plays a loud and a quiet master at the same level", async ({ 
       return 10 * Math.log10(sum / n);
     }, `${MEDIA}/${name}.mp3`);
 
-  await expect(page.getByRole("button", { name: /Volume match: ON/ })).toBeVisible();
+  await expect(page.getByRole("switch", { name: /Volume match/ })).toHaveAttribute("aria-checked", "true");
   const matched = (await level("loud")) - (await level("quiet"));
   expect(Math.abs(matched)).toBeLessThan(1.5);
 
-  await page.getByRole("button", { name: /Volume match/ }).click();
-  await expect(page.getByRole("button", { name: /Volume match: OFF/ })).toBeVisible();
+  await page.getByRole("switch", { name: /Volume match/ }).click();
+  await expect(page.getByRole("switch", { name: /Volume match/ })).toHaveAttribute("aria-checked", "false");
   const raw = (await level("loud")) - (await level("quiet"));
   expect(raw).toBeGreaterThan(3.5); // the 5 dB difference is back
 });
@@ -202,4 +205,43 @@ test("copy song data puts each track's analysis on the clipboard", async ({ page
   expect(data[0].partyMixOut).toBeGreaterThan(55);
   expect(data[0].partyMixOut).toBeLessThan(75);
   expect(typeof data[0].lufs).toBe("number");
+});
+
+test("Mix now starts the next song early, and the DJ can search by name", async ({ page }) => {
+  await page.goto("/");
+  // Search results (YouTube isn't reachable offline: answer with local test songs).
+  await page.route("**/api/search?**", (route) =>
+    route.fulfill({
+      json: {
+        results: [
+          { title: "G_major", url: `${MEDIA}/G_major.mp3`, channel: "Test", duration: 24 },
+          { title: "A_minor", url: `${MEDIA}/A_minor.mp3`, channel: "Test", duration: 24 },
+        ],
+      },
+    })
+  );
+  await page.getByLabel("Search a song or paste a link").fill("major and minor");
+  await page.getByRole("button", { name: "Search" }).click();
+  for (const name of ["G_major", "A_minor"]) {
+    const result = page.locator(".results li", { hasText: name });
+    await result.getByRole("button", { name: /Add/ }).click();
+    await expect(result.getByRole("button", { name: "Added ✓" })).toBeVisible({ timeout: 60_000 });
+  }
+  await expect(page.locator(".tracks li")).toHaveCount(2);
+
+  await page.locator(".topbar").getByRole("button", { name: /Start set/ }).click();
+  const status = page.locator(".set-status");
+  await expect(status).toContainText("Live · song 1 of 2", { timeout: 30_000 });
+  const now = page.getByRole("region", { name: "Now playing" });
+  await expect(now).toContainText(/Mixing into .* in \d+:\d\d/, { timeout: 10_000 });
+
+  // 24 s songs with a 16 s blend would mix at ~8 s; Mix now starts it right away.
+  await now.getByRole("button", { name: /Mix now/ }).click();
+  await expect(status).toContainText("Mixing", { timeout: 3_000 });
+  const pos = await page.evaluate(() => {
+    const e = window.engine;
+    return e.deck(e.auto.front).position();
+  });
+  expect(pos).toBeLessThan(7);
+  await page.locator(".topbar").getByRole("button", { name: /Stop/ }).click();
 });

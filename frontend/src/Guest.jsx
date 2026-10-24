@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { API } from "./api";
+import Art from "./Art";
 import "./Guest.css";
 
 const NAME_KEY = "mydj-guest-name";
@@ -105,7 +106,7 @@ function Party({ name, voter, onRename }) {
         `/api/party/queue?voter=${encodeURIComponent(voter)}&name=${encodeURIComponent(name)}`,
         { timeout: 5000 }
       );
-      setQueue(q);
+      setQueue({ ...q, receivedAt: Date.now() });
       setConn("ok");
     } catch (e) {
       if (e instanceof Unreachable) setConn((c) => (c === "ok" || c === "lost" ? "lost" : "unreachable"));
@@ -142,12 +143,13 @@ function Party({ name, voter, onRename }) {
   return (
     <div className="guest">
       <header className="g-head">
-        <h1>🎧 MyDJ party</h1>
+        <h1>🎧 MyDJ</h1>
         <button className="g-link" onClick={onRename} title="Change your name">
           👤 {name}
         </button>
       </header>
       <ConnectionBar conn={conn} queue={queue} />
+      {queue?.now && <NowPlaying queue={queue} />}
       <AddSong name={name} voter={voter} onSent={refresh} />
       {notice && <div className="g-error">{notice}</div>}
       {queue && <Queue queue={queue} onVote={vote} />}
@@ -176,10 +178,14 @@ function ConnectionBar({ conn, queue }) {
     title = "Connected, but the DJ's party session is off";
     detail = "You can still add songs — they'll join the queue when it's back on.";
   } else if (conn === "ok" && queue) {
-    tone = "ok";
     const n = queue.guests?.length || 1;
-    title = "Connected to the DJ";
-    detail = n > 1 ? `${n} phones here` : "You're the first one here";
+    return (
+      <div className="g-conn ok compact" role="status">
+        <span className="dot" />
+        <span className="g-conn-title">Connected to the DJ</span>
+        <span className="g-conn-detail">· {n > 1 ? `${n} phones here` : "you're the first one here"}</span>
+      </div>
+    );
   }
   return (
     <div className={`g-conn ${tone}`} role="status">
@@ -199,12 +205,14 @@ function AddSong({ name, voter, onSent }) {
   const [sent, setSent] = useState({}); // url -> "sending" | "sent" | error message
   const [error, setError] = useState("");
 
-  async function request(url, title) {
+  async function request(url, title, { pasted = false } = {}) {
     setSent((s) => ({ ...s, [url]: "sending" }));
     try {
       await post("/api/party/request", { url, name, voter, title: title || "" });
       setSent((s) => ({ ...s, [url]: "sent" }));
       onSent();
+      // A pasted link has nothing else to pick from; its progress shows under "On the way".
+      if (pasted) setTimeout(() => setResults((r) => r.filter((x) => x.url !== url)), 2000);
     } catch (e) {
       setSent((s) => ({ ...s, [url]: e.message }));
     }
@@ -218,7 +226,7 @@ function AddSong({ name, voter, onSent }) {
     if (/^https?:\/\//i.test(q)) {
       setResults([{ url: q, title: q }]);
       setText("");
-      request(q);
+      request(q, "", { pasted: true });
       return;
     }
     setSearching(true);
@@ -280,21 +288,59 @@ function AddSong({ name, voter, onSent }) {
   );
 }
 
+// What's playing, with a progress bar that keeps moving between polls.
+function NowPlaying({ queue }) {
+  const { now, next, progress: p, receivedAt } = queue;
+  const [clock, setClock] = useState(receivedAt);
+  useEffect(() => {
+    const t = setInterval(() => setClock(Date.now()), 500);
+    return () => clearInterval(t);
+  }, []);
+  const pos = p ? Math.min(p.dur, p.pos + Math.max(0, clock - receivedAt) / 1000) : 0;
+  const until = p?.mixAt != null ? p.mixAt - pos : null;
+  return (
+    <section className="g-now" aria-label="Now playing">
+      {now.thumbnail && <img className="g-now-glow" src={now.thumbnail} alt="" />}
+      <div className="g-now-row">
+        <Art track={now} size={72} />
+        <div className="g-main">
+          <div className="g-label">{p?.mixing ? "MIXING" : "NOW PLAYING"}</div>
+          <div className="g-now-title">{now.title}</div>
+          <div className="g-sub">
+            {[now.uploader, now.addedBy && `👤 ${now.addedBy}`].filter(Boolean).join(" · ")}
+          </div>
+        </div>
+      </div>
+      {p && p.dur > 0 && (
+        <div className="g-progress">
+          <div className="g-progress-fill" style={{ width: `${(pos / p.dur) * 100}%` }} />
+        </div>
+      )}
+      {next && (
+        <div className="g-upnext">
+          <span className="g-label">UP NEXT</span>
+          <span className="g-upnext-title">{next.title}</span>
+          {until != null && until > 0 && !p?.mixing && <span className="g-sub">in {fmtDur(until)}</span>}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Queue({ queue, onVote }) {
-  const { now, next, upcoming, pending } = queue;
+  const { upcoming, pending } = queue;
   return (
     <section className="g-queue">
-      {now && <Song label="NOW PLAYING" t={now} />}
-      {next && <Song label="UP NEXT" t={next} />}
       {pending.length > 0 && <h2>On the way</h2>}
       {pending.map((p) => (
         <div key={p.rid} className={`g-song pending ${p.status}`}>
+          {p.status === "downloading" && <span className="g-spin" aria-hidden="true" />}
           <div className="g-main">
             <div className="g-title">{p.title || "A pasted link"}</div>
             <div className="g-sub">
               👤 {p.addedBy} ·{" "}
               {p.status === "downloading"
-                ? "⏳ downloading & analyzing (usually 10–30 s)"
+                ? "downloading & analyzing (usually 10–30 s)"
                 : p.status === "ready"
                   ? "✓ ready — joining the queue…"
                   : `⚠ couldn't add: ${p.error}`}
@@ -303,44 +349,42 @@ function Queue({ queue, onVote }) {
         </div>
       ))}
       <h2>Queue {upcoming.length > 0 && `· ${upcoming.length}`}</h2>
-      {upcoming.length === 0 && (
-        <div className="g-note">Nothing queued yet — add a song!</div>
-      )}
-      {upcoming.map((t) => (
-        <Song key={t.id} t={t} onVote={onVote} />
+      {upcoming.length === 0 && <div className="g-note">Nothing queued yet — add a song!</div>}
+      {upcoming.map((t, i) => (
+        <Song key={t.id} t={t} pos={i + 1} onVote={onVote} />
       ))}
     </section>
   );
 }
-function Song({ t, label, onVote }) {
+
+function Song({ t, pos, onVote }) {
   return (
-    <div className={`g-song ${label ? "featured" : ""}`}>
+    <div className="g-song">
+      <span className="g-pos">{pos}</span>
+      <Art track={t} size={44} />
       <div className="g-main">
-        {label && <div className="g-label">{label}</div>}
         <div className="g-title">{t.title}</div>
         <div className="g-sub">
-          {[t.addedBy ? `👤 ${t.addedBy}` : "🎧 DJ", t.genre].filter(Boolean).join(" · ")}
+          {[t.uploader, t.addedBy ? `👤 ${t.addedBy}` : "🎧 DJ"].filter(Boolean).join(" · ")}
         </div>
       </div>
-      {onVote && (
-        <div className="g-vote">
-          <button
-            className={t.myVote > 0 ? "on" : ""}
-            onClick={() => onVote(t, 1)}
-            aria-label={`Upvote ${t.title}`}
-          >
-            ▲
-          </button>
-          <span className="g-score">{t.score}</span>
-          <button
-            className={t.myVote < 0 ? "on down" : ""}
-            onClick={() => onVote(t, -1)}
-            aria-label={`Downvote ${t.title}`}
-          >
-            ▼
-          </button>
-        </div>
-      )}
+      <div className="g-vote">
+        <button
+          className={t.myVote > 0 ? "on" : ""}
+          onClick={() => onVote(t, 1)}
+          aria-label={`Upvote ${t.title}`}
+        >
+          ▲
+        </button>
+        <span className={`g-score ${t.score > 0 ? "up" : t.score < 0 ? "down" : ""}`}>{t.score}</span>
+        <button
+          className={t.myVote < 0 ? "on down" : ""}
+          onClick={() => onVote(t, -1)}
+          aria-label={`Downvote ${t.title}`}
+        >
+          ▼
+        </button>
+      </div>
     </div>
   );
 }

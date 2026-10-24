@@ -51,7 +51,7 @@ test("friends add songs from their phones and votes reorder the queue", async ({
   await host.locator(".loadbar button").click();
   const rows = host.locator(".tracks li");
   await expect(rows).toHaveCount(1, { timeout: 60_000 });
-  await host.getByRole("button", { name: /Party session: OFF/ }).click();
+  await host.getByRole("button", { name: "Start party session" }).click();
 
   // The DJ's panel checks the network and waits for a phone.
   const status = host.locator(".party-status");
@@ -91,7 +91,7 @@ test("friends add songs from their phones and votes reorder the queue", async ({
   await phone.getByRole("button", { name: "Upvote C_major" }).click();
   await expect(song("C_major").locator(".g-score")).toHaveText("1");
   await expect(rows.nth(0)).toContainText("C_major", { timeout: 10_000 });
-  await expect(rows.nth(0).locator(".chip.votes")).toHaveText("▲ 1");
+  await expect(rows.nth(0).locator(".votes")).toHaveText("▲ 1");
 
   // Three downvotes drop a song.
   const queue = await (await phone.request.get(`${API}/api/party/queue`)).json();
@@ -102,14 +102,18 @@ test("friends add songs from their phones and votes reorder the queue", async ({
   await expect(host.locator(".tracks li", { hasText: "G_major" })).toHaveCount(0);
 
   // Start the set: the phone shows what's playing and what's next.
-  await host.getByRole("button", { name: /Start Set/ }).click();
-  await expect(phone.locator(".g-song.featured").first()).toContainText("NOW PLAYING", {
-    timeout: 15_000,
-  });
-  await expect(phone.locator(".g-song.featured").first()).toContainText("C_major");
-  await expect(phone.locator(".g-song.featured").nth(1)).toContainText("UP NEXT");
+  await host.locator(".topbar").getByRole("button", { name: /Start set/ }).click();
+  const nowCard = phone.getByRole("region", { name: "Now playing" });
+  await expect(nowCard).toContainText("NOW PLAYING", { timeout: 15_000 });
+  await expect(nowCard).toContainText("C_major");
+  await expect(nowCard).toContainText("UP NEXT");
+  await expect(nowCard).toContainText(/in \d+:\d\d/); // countdown to the next song
+  const fill = nowCard.locator(".g-progress-fill");
+  const w1 = await fill.evaluate((el) => parseFloat(el.style.width));
+  await phone.waitForTimeout(2000);
+  expect(await fill.evaluate((el) => parseFloat(el.style.width))).toBeGreaterThan(w1); // it moves
 
-  await host.getByRole("button", { name: /Stop/ }).click();
+  await host.locator(".topbar").getByRole("button", { name: /Stop/ }).click();
   expect(errors).toEqual([]);
 });
 
@@ -118,7 +122,7 @@ test("phones get clear feedback when something's wrong", async ({ device }) => {
   const host = await device();
   const phone = await device({ viewport: { width: 390, height: 844 } });
   await host.goto("/");
-  await host.getByRole("button", { name: /Party session: OFF/ }).click();
+  await host.getByRole("button", { name: "Start party session" }).click();
   await join(phone, "Ben");
   const bar = phone.locator(".g-conn");
   await expect(bar).toContainText("Connected to the DJ");
@@ -147,6 +151,6 @@ test("phones get clear feedback when something's wrong", async ({ device }) => {
   await expect(blocked.locator(".g-conn")).toContainText("Windows Firewall");
 
   // The DJ turns the party session off: phones are told (after the 10 s heartbeat timeout).
-  await host.getByRole("button", { name: /Party session: ON/ }).click();
+  await host.getByRole("region", { name: "Party session" }).getByRole("button", { name: "End" }).click();
   await expect(bar).toContainText("party session is off", { timeout: 20_000 });
 });

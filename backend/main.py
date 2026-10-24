@@ -25,8 +25,10 @@ from yt_dlp.utils import DownloadError, ExtractorError
 
 from analyzer import analyze
 from downloader import DOWNLOAD_DIR, download, get_info, search
+from keyshift import shifted
 from llm_order import order_tracks
 from party import Party, lan_addresses
+from stems import StemJobs, stem_paths
 
 # Load backend/.env (e.g. ANTHROPIC_API_KEY for AI Polish) regardless of CWD.
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
@@ -51,15 +53,17 @@ MAX_CACHED = 200
 
 def _prune_downloads(keep: int = MAX_CACHED) -> None:
     try:
-        files = glob.glob(os.path.join(DOWNLOAD_DIR, "*.mp3"))
+        files = [f for f in glob.glob(os.path.join(DOWNLOAD_DIR, "*.mp3"))
+                 if ID_RE.match(os.path.basename(f)[:-4])]  # the tracks, not their stems/shifts
         if len(files) <= keep:
             return
         files.sort(key=os.path.getmtime, reverse=True)  # newest first
         for f in files[keep:]:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
+            for g in glob.glob(f[:-4] + ".*"):  # the track + its stems and key-shifted copies
+                try:
+                    os.remove(g)
+                except OSError:
+                    pass
     except OSError:
         pass
 
@@ -76,6 +80,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MyDJ", lifespan=lifespan)
+stem_jobs = StemJobs()  # vocal/instrumental separation, in the background
 
 # Frontend origins allowed to call the API. Defaults to local dev; in production set
 # ALLOWED_ORIGINS (comma-separated), e.g. "https://your-frontend.onrender.com".
@@ -250,17 +255,56 @@ def _load_track(url: str) -> dict:
         "lufs": feat["lufs"],
         "bigParts": feat["bigParts"],
         "loudness": feat["loudness"],
+        "grid": feat["grid"],  # {bpm, beat, downbeat, confidence} or None
+        "stems": stem_jobs.add(res["id"], res["path"]),  # queued | off
     }
 
 
 @app.get("/api/audio/{track_id}")
-def audio(track_id: str):
-    """Serve a loaded track inline for the browser to decode into an AudioBuffer."""
+def audio(track_id: str, semitones: int = 0):
+    """Serve a loaded track inline for the browser to decode into an AudioBuffer —
+    optionally key-shifted by a semitone or two (same tempo) to fix a key clash."""
     if not ID_RE.match(track_id):
         raise HTTPException(status_code=404, detail="Not found")
-    path = os.path.join(DOWNLOAD_DIR, f"{track_id}.mp3")
+    return _serve(os.path.join(DOWNLOAD_DIR, f"{track_id}.mp3"), semitones)
+
+
+class StemOrderRequest(BaseModel):
+    ids: list[str]
+
+
+@app.get("/api/stems")
+def stems_status(ids: str = ""):
+    """Separation progress per track: {id: {status, progress, vocals?}}, where status is
+    queued | running | done | failed | off | unavailable and vocals = [[start, end], ...]."""
+    return stem_jobs.status([t for t in ids.split(",") if ID_RE.match(t)])
+
+
+@app.post("/api/stems/order")
+def stems_order(req: StemOrderRequest):
+    """Separate the songs in the order the set will need them."""
+    stem_jobs.prioritize(req.ids)
+    return {"ok": True}
+
+
+@app.get("/api/stems/{track_id}/{part}")
+def stem(track_id: str, part: str, semitones: int = 0):
+    """A track's vocal or instrumental stem (optionally key-shifted, like /api/audio)."""
+    if not ID_RE.match(track_id) or part not in ("vocals", "inst"):
+        raise HTTPException(status_code=404, detail="Not found")
+    return _serve(stem_paths(os.path.join(DOWNLOAD_DIR, f"{track_id}.mp3"))[part], semitones)
+
+
+def _serve(path: str, semitones: int):
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Track not loaded (reload it)")
+    if semitones:
+        if semitones not in (-2, -1, 1, 2):
+            raise HTTPException(status_code=400, detail="Key shifts are limited to ±2 semitones")
+        try:
+            path = shifted(path, semitones)
+        except Exception:
+            raise HTTPException(status_code=500, detail="Key shift failed")
     return FileResponse(path, media_type="audio/mpeg")
 
 

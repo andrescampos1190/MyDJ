@@ -107,6 +107,7 @@ class Party:
                 "now": tag(snap.get("now")),
                 "next": tag(snap.get("next")),
                 "upcoming": [tag(t) for t in snap.get("upcoming") or []],
+                "progress": snap.get("progress"),  # {pos, dur, mixAt, mixing} of the song playing
                 "pending": incoming,
                 "guests": self._connected(now),
             }

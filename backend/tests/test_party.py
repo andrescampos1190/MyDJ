@@ -86,6 +86,15 @@ def test_guest_view_merges_votes_into_the_hosts_queue():
     assert p.view("cy")["upcoming"][0]["myVote"] == 0
 
 
+def test_guest_view_passes_on_playback_progress():
+    p = Party()
+    progress = {"pos": 42.5, "dur": 200, "mixAt": 100, "mixing": False}
+    p.sync({"playing": True, "now": {"id": ID, "title": "Now"}, "progress": progress})
+    assert p.view("ana")["progress"] == progress
+    p.sync({"playing": False})
+    assert p.view("ana")["progress"] is None
+
+
 def test_vote_endpoint_validates(client):
     assert client.post("/api/party/vote", json={"trackId": "x", "voter": "a", "value": 1}).status_code == 400
     assert client.post("/api/party/vote", json={"trackId": ID, "voter": "", "value": 1}).status_code == 400

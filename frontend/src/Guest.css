@@ -1,7 +1,6 @@
 .guest {
   max-width: 560px;
   margin: 0 auto;
-  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -9,24 +8,31 @@
 }
 .guest h1 {
   font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
   margin: 0;
 }
 .guest h2 {
-  font-size: 13px;
-  letter-spacing: 0.08em;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
-  margin: 6px 0 0;
+  margin: 8px 0 0;
 }
 .guest input {
   flex: 1;
   min-width: 0;
   font-size: 16px; /* >= 16px stops iOS zooming into the field */
-  padding: 12px;
-  border-radius: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--card);
   color: var(--text);
+  outline: none;
+}
+.guest input:focus {
+  border-color: var(--accent);
 }
 .g-head {
   display: flex;
@@ -47,86 +53,26 @@
   flex-direction: column;
   gap: 10px;
 }
-.g-search {
-  display: flex;
-  gap: 8px;
-}
 .g-btn {
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--card-2);
   color: var(--text);
-  padding: 10px 14px;
+  padding: 11px 14px;
   font-size: 15px;
+  font-weight: 600;
   white-space: nowrap;
 }
 .g-btn.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
-  font-weight: 700;
 }
 .g-btn:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
 }
-.g-results,
-.g-queue {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.g-results li,
-.g-song {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 10px 12px;
-}
-.g-results img {
-  width: 56px;
-  height: 42px;
-  object-fit: cover;
-  border-radius: 6px;
-  flex-shrink: 0;
-}
-.g-main {
-  flex: 1;
-  min-width: 0;
-}
-.g-title {
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.g-sub {
-  font-size: 13px;
-  color: var(--muted);
-  margin-top: 2px;
-}
-.g-label {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--accent);
-  margin-bottom: 2px;
-}
-.g-song.featured {
-  border-color: var(--accent);
-  background: var(--accent-bg);
-}
-.g-song.pending {
-  border-style: dashed;
-}
-.g-song.pending.failed .g-sub {
-  color: var(--danger-text);
-}
+
+/* ---- Connection --------------------------------------------------------------------- */
 .g-conn {
   display: flex;
   align-items: flex-start;
@@ -136,19 +82,31 @@
   border: 1px solid var(--border);
   background: var(--card);
 }
+.g-conn.compact {
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+}
 .g-conn .dot {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   margin-top: 6px;
   flex-shrink: 0;
   background: var(--muted);
 }
+.g-conn.compact .dot {
+  margin-top: 0;
+}
 .g-conn.ok .dot {
-  background: #34d399;
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
 }
 .g-conn.warn .dot {
-  background: #fbbf24;
+  background: var(--warn);
 }
 .g-conn.bad {
   border-color: var(--danger-border);
@@ -167,41 +125,218 @@
 .g-conn.bad .g-conn-detail {
   color: var(--danger-text);
 }
-.g-vote {
+
+/* ---- Now playing -------------------------------------------------------------------- */
+.g-now {
+  position: relative;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid rgba(124, 92, 255, 0.45);
+  background: linear-gradient(160deg, #1d1a33, var(--card) 70%);
+  padding: 14px;
   display: flex;
   flex-direction: column;
+  gap: 12px;
+}
+.g-now-glow {
+  position: absolute;
+  inset: -40%;
+  width: 180%;
+  height: 180%;
+  object-fit: cover;
+  filter: blur(50px) saturate(1.4);
+  opacity: 0.3;
+  pointer-events: none;
+}
+.g-now > *:not(.g-now-glow) {
+  position: relative;
+}
+.g-now-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.g-now .art {
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.g-now-title {
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 1.2;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.g-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.g-progress-fill {
+  height: 100%;
+  background: var(--accent-hover);
+  border-radius: 999px;
+  transition: width 0.5s linear;
+}
+.g-upnext {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.g-upnext .g-label {
+  margin: 0;
+  flex-shrink: 0;
+}
+.g-upnext-title {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.g-upnext .g-sub {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+/* ---- Add songs ---------------------------------------------------------------------- */
+.g-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.g-search {
+  display: flex;
+  gap: 8px;
+}
+.g-results,
+.g-queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.g-results li,
+.g-song {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+.g-results img {
+  width: 56px;
+  height: 42px;
+  object-fit: cover;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+.g-main {
+  flex: 1;
+  min-width: 0;
+}
+.g-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.g-sub {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.g-label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: var(--accent-hover);
+  margin-bottom: 2px;
+}
+
+/* ---- Queue -------------------------------------------------------------------------- */
+.g-pos {
+  width: 16px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.g-song.pending {
+  border-style: dashed;
+}
+.g-song.pending.failed .g-sub {
+  color: var(--danger-text);
+  white-space: normal;
+}
+.g-spin {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--accent-hover);
+  border-radius: 50%;
+  animation: g-spin 0.8s linear infinite;
+}
+@keyframes g-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.g-vote {
+  display: flex;
   align-items: center;
   flex-shrink: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
 }
 .g-vote button {
   background: none;
   border: none;
   color: var(--muted);
-  font-size: 20px;
-  padding: 2px 10px;
+  font-size: 15px;
+  padding: 8px 11px; /* comfortable thumb target */
   line-height: 1;
 }
 .g-vote button.on {
-  color: #34d399;
+  color: var(--ok);
 }
 .g-vote button.on.down {
   color: var(--danger-text);
 }
 .g-score {
+  min-width: 14px;
+  text-align: center;
   font-weight: 700;
   font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.g-score.up {
+  color: var(--ok);
+}
+.g-score.down {
+  color: var(--danger-text);
 }
 .g-note {
   color: var(--muted);
   text-align: center;
-  padding: 12px;
+  padding: 14px;
 }
 .g-error {
   color: var(--danger-text);
   font-size: 13px;
-}
-.g-add {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }

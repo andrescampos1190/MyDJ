@@ -1,6 +1,7 @@
 # Python
 backend/venv/
 backend/downloads/
+backend/models/
 __pycache__/
 *.pyc
 
