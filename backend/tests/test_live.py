@@ -36,3 +36,10 @@ def test_live_load(client, url):
     data = r.json()
     assert data["title"]
     assert client.get(data["audioUrl"]).status_code == 200
+
+
+def test_live_search(client):
+    r = client.get("/api/search", params={"q": "me at the zoo"})
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert results and all(x["url"].startswith("https://") for x in results)

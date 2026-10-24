@@ -106,6 +106,39 @@ export function bestInsertIndex(list, track, lo = 0, hi = list.length) {
   return best;
 }
 
+// Party-session order for the upcoming tracks: higher net votes first. Within equal
+// votes, `smooth` chains them greedily for the best mix starting from `prev` (the track
+// before them); otherwise their current (e.g. hand-picked) order is kept.
+export function voteOrder(prev, tracks, scoreOf, { smooth = true } = {}) {
+  const groups = new Map();
+  for (const t of tracks) {
+    const s = scoreOf(t) || 0;
+    if (!groups.has(s)) groups.set(s, []);
+    groups.get(s).push(t);
+  }
+  const out = [];
+  let last = prev;
+  for (const s of [...groups.keys()].sort((a, b) => b - a)) {
+    const left = groups.get(s).slice();
+    while (left.length) {
+      let pick = 0;
+      if (smooth && last) {
+        let best = Infinity;
+        left.forEach((t, i) => {
+          const c = pairCost(last, t);
+          if (c < best) {
+            best = c;
+            pick = i;
+          }
+        });
+      }
+      last = left.splice(pick, 1)[0];
+      out.push(last);
+    }
+  }
+  return out;
+}
+
 // Greedy harmonic path from a low-energy opener, biased to follow a rising-then-
 // easing energy arc. Returns the reordered tracks + per-transition quality.
 export function orderForParty(tracks, opts = {}) {

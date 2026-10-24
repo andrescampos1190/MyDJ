@@ -122,6 +122,27 @@ all of the above on every push, plus a Docker build check and the live tests.
 4. During the set, keep adding songs; use **⏭ Next** / **▲▼** / **✕** to steer the queue. **NOW**
    and **NEXT** tags show what's playing and what's mixing in next.
 
+## Party session (friends add songs and vote from their phones)
+1. Start the app as usual (`.\start.ps1`). The backend and frontend now listen on your home
+   network too. **The first time, Windows asks whether to allow Python and Node.js through the
+   firewall — allow them on Private networks**, or phones can't connect.
+2. In the app, turn on **📱 Party session**. A QR code and a link like
+   `http://192.168.1.23:5173/guest` appear.
+3. Friends on the **same Wi-Fi** scan the code, type their name once, then:
+   - **search** for a song by name (top YouTube results) or **paste a link**, and tap **＋ Add**;
+   - **▲ / ▼ vote** on anything queued (tap again to take a vote back).
+4. How the queue reacts:
+   - **Votes win, the mix stays smooth:** songs with more net votes play sooner; among songs with
+     equal votes, auto-order picks the best-mixing order (or keeps your manual order if
+     **🪄 Auto-order** is off).
+   - A song at **-3** net votes is dropped.
+   - The song playing and the one already mixing in never move.
+   - You can still reorder/remove on the DJ screen; votes re-sort the queue whenever they change.
+   - Friends' songs show who added them (👤) and their votes (▲ / ▼).
+
+> Anyone on your Wi-Fi can open the party page and add songs. It's meant for your home network;
+> don't port-forward it to the internet.
+
 ## How it works
 - **Analysis** (`backend/analyzer.py`): ffmpeg → PCM, an FFT chromagram + Krumhansl–Schmuckler
   profile matching for key (→ Camelot), and loudness/brightness for energy. BPM + beat offset are

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Engine, API } from "./audioEngine";
 import { relativeEnergies } from "./ordering";
+import { PartyHost } from "./party";
+import QRCode from "qrcode";
 import Waveform from "./Waveform";
 import "./App.css";
 
@@ -15,6 +17,10 @@ export default function App() {
   const engineRef = useRef(null);
   if (!engineRef.current) engineRef.current = new Engine();
   const engine = engineRef.current;
+  const partyRef = useRef(null);
+  if (!partyRef.current) partyRef.current = new PartyHost(engine);
+  const party = partyRef.current;
+  useEffect(() => () => party.stop(), [party]);
   if (typeof window !== "undefined" && import.meta.env.DEV) window.engine = engine; // dev-only debug hook
 
   const [, force] = useState(0);
@@ -80,7 +86,8 @@ export default function App() {
         <DeckMini engine={engine} which="B" />
       </div>
       <Crossfader engine={engine} />
-      <Playlist engine={engine} />
+      <PartyPanel party={party} />
+      <Playlist engine={engine} party={party} />
     </div>
   );
 }
@@ -183,7 +190,56 @@ function Crossfader({ engine }) {
   );
 }
 
-function Playlist({ engine }) {
+// Party session: friends on the same Wi-Fi scan the code to add songs and vote.
+function PartyPanel({ party }) {
+  const urls = party.on ? party.joinUrls() : [];
+  const url = urls[0];
+  const [qr, setQr] = useState({ url: "", src: "" });
+  useEffect(() => {
+    if (!url) return;
+    let alive = true;
+    QRCode.toDataURL(url, { margin: 1, width: 200 }).then((src) => alive && setQr({ url, src }));
+    return () => {
+      alive = false;
+    };
+  }, [url]);
+  return (
+    <div className="party">
+      <div className="party-head">
+        <button
+          className={`toggle ${party.on ? "on" : ""}`}
+          onClick={() => (party.on ? party.stop() : party.start())}
+          title="Let friends on your Wi-Fi add songs and vote from their phones"
+        >
+          📱 Party session: {party.on ? "ON" : "OFF"}
+        </button>
+        {party.on && <span className="muted">Friends on your Wi-Fi can add songs and vote.</span>}
+      </div>
+      {party.on && url && (
+        <div className="party-join">
+          {qr.url === url && <img src={qr.src} alt="QR code to join the party" />}
+          <div>
+            <div>Scan with a phone camera, or open:</div>
+            <div className="party-url">{url}</div>
+            {urls.slice(1).map((u) => (
+              <div key={u} className="muted">
+                or {u}
+              </div>
+            ))}
+            <div className="muted">Phones must be on the same Wi-Fi as this computer.</div>
+          </div>
+        </div>
+      )}
+      {party.on && !url && !party.error && (
+        <div className="muted">Looking up this computer's network address…</div>
+      )}
+      {party.adding > 0 && <div className="muted">Adding a song from a friend…</div>}
+      {party.error && <div className="error">{party.error}</div>}
+    </div>
+  );
+}
+
+function Playlist({ engine, party }) {
   const auto = engine.auto;
   const [url, setUrl] = useState("");
   const [adding, setAdding] = useState(false);
@@ -391,6 +447,12 @@ function Playlist({ engine }) {
                     </span>
                     <span className="chip nrg">⚡{t.energy ?? "–"}</span>
                     {t.genre && <span className="chip genre">{t.genre}</span>}
+                    {t.addedBy && <span className="chip who">👤 {t.addedBy}</span>}
+                    {party.on && !!t.score && (
+                      <span className={`chip votes ${t.score < 0 ? "down" : ""}`}>
+                        {t.score > 0 ? "▲" : "▼"} {Math.abs(t.score)}
+                      </span>
+                    )}
                   </div>
                 </div>
                 {isCurrent && <span className="tag now">NOW</span>}

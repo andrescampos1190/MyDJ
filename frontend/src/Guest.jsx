@@ -1,0 +1,288 @@
+// The page friends open on their phones during a party session (/guest): search or
+// paste a song to add it, and vote on the queue. No audio here — the DJ's computer plays.
+
+import { useEffect, useState } from "react";
+import { API } from "./api";
+import "./Guest.css";
+
+const NAME_KEY = "mydj-guest-name";
+const VOTER_KEY = "mydj-voter";
+const POLL_MS = 2500;
+
+function load(key) {
+  try {
+    return localStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+function save(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* private mode — fine for this visit */
+  }
+}
+// One id per phone, so each friend gets one vote per song. (crypto.randomUUID needs
+// https, which a home-network http:// page doesn't have.)
+function voterId() {
+  let v = load(VOTER_KEY);
+  if (!v) {
+    v = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    save(VOTER_KEY, v);
+  }
+  return v;
+}
+
+async function api(path, opts) {
+  let res;
+  try {
+    res = await fetch(`${API}${path}`, opts);
+  } catch {
+    throw new Error("Can't reach the DJ's computer — same Wi-Fi?");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `Something went wrong (${res.status})`);
+  return data;
+}
+const post = (path, body) =>
+  api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+function fmtDur(s) {
+  if (!Number.isFinite(s)) return "";
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+}
+
+export default function Guest() {
+  const [name, setName] = useState(() => load(NAME_KEY));
+  const [voter] = useState(voterId);
+  if (!name) return <Join onJoin={(n) => (save(NAME_KEY, n), setName(n))} />;
+  return <Party name={name} voter={voter} onRename={() => setName("")} />;
+}
+
+function Join({ onJoin }) {
+  const [draft, setDraft] = useState("");
+  const submit = (e) => {
+    e.preventDefault();
+    if (draft.trim()) onJoin(draft.trim().slice(0, 30));
+  };
+  return (
+    <div className="guest">
+      <h1>🎧 MyDJ party</h1>
+      <form className="g-join" onSubmit={submit}>
+        <label htmlFor="g-name">What's your name?</label>
+        <input
+          id="g-name"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="So friends know who added what"
+          autoFocus
+        />
+        <button className="g-btn primary" disabled={!draft.trim()}>
+          Join
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function Party({ name, voter, onRename }) {
+  const [queue, setQueue] = useState(null);
+  const [offline, setOffline] = useState("");
+
+  async function refresh() {
+    try {
+      setQueue(await api(`/api/party/queue?voter=${encodeURIComponent(voter)}`));
+      setOffline("");
+    } catch (e) {
+      setOffline(e.message);
+    }
+  }
+  useEffect(() => {
+    const first = setTimeout(refresh, 0);
+    const t = setInterval(refresh, POLL_MS);
+    return () => {
+      clearTimeout(first);
+      clearInterval(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- poll for the page's lifetime
+  }, []);
+
+  async function vote(track, value) {
+    const next = track.myVote === value ? 0 : value; // tap again to take it back
+    setQueue((q) => ({
+      ...q,
+      upcoming: q.upcoming.map((t) =>
+        t.id === track.id ? { ...t, myVote: next, score: t.score - t.myVote + next } : t
+      ),
+    }));
+    try {
+      await post("/api/party/vote", { trackId: track.id, voter, value: next });
+    } catch (e) {
+      setOffline(e.message);
+    }
+    refresh();
+  }
+
+  return (
+    <div className="guest">
+      <header className="g-head">
+        <h1>🎧 MyDJ party</h1>
+        <button className="g-link" onClick={onRename} title="Change your name">
+          👤 {name}
+        </button>
+      </header>
+      <AddSong name={name} onAdded={refresh} />
+      {offline && <div className="g-error">{offline}</div>}
+      {queue && !queue.hostOnline && (
+        <div className="g-note">Waiting for the DJ to start the party session…</div>
+      )}
+      {queue && <Queue queue={queue} onVote={vote} />}
+    </div>
+  );
+}
+
+function AddSong({ name, onAdded }) {
+  const [text, setText] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [status, setStatus] = useState({}); // url -> "adding" | "added" | error message
+  const [error, setError] = useState("");
+
+  async function request(url) {
+    setStatus((s) => ({ ...s, [url]: "adding" }));
+    try {
+      await post("/api/party/request", { url, name });
+      setStatus((s) => ({ ...s, [url]: "added" }));
+      onAdded();
+    } catch (e) {
+      setStatus((s) => ({ ...s, [url]: e.message }));
+    }
+  }
+
+  async function submit(e) {
+    e.preventDefault();
+    const q = text.trim();
+    if (!q) return;
+    setError("");
+    if (/^https?:\/\//i.test(q)) {
+      setResults([{ url: q, title: q }]);
+      setText("");
+      request(q);
+      return;
+    }
+    setSearching(true);
+    try {
+      setResults((await api(`/api/search?q=${encodeURIComponent(q)}`)).results);
+    } catch (e2) {
+      setError(e2.message);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  return (
+    <section className="g-add">
+      <form onSubmit={submit} className="g-search">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Search a song or paste a link"
+          enterKeyHint="search"
+        />
+        <button className="g-btn primary" disabled={!text.trim() || searching}>
+          {searching ? "…" : "Search"}
+        </button>
+      </form>
+      {error && <div className="g-error">{error}</div>}
+      {results.length > 0 && (
+        <ul className="g-results">
+          {results.map((r) => {
+            const st = status[r.url];
+            return (
+              <li key={r.url}>
+                {r.thumbnail && <img src={r.thumbnail} alt="" />}
+                <div className="g-main">
+                  <div className="g-title">{r.title}</div>
+                  <div className="g-sub">
+                    {[r.channel, fmtDur(r.duration)].filter(Boolean).join(" · ")}
+                  </div>
+                  {st && st !== "adding" && st !== "added" && <div className="g-error">{st}</div>}
+                </div>
+                <button
+                  className="g-btn"
+                  onClick={() => request(r.url)}
+                  disabled={st === "adding" || st === "added"}
+                >
+                  {st === "adding" ? "Adding…" : st === "added" ? "Added ✓" : "＋ Add"}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function Queue({ queue, onVote }) {
+  const { now, next, upcoming, pending } = queue;
+  return (
+    <section className="g-queue">
+      {now && <Song label="NOW PLAYING" t={now} />}
+      {next && <Song label="UP NEXT" t={next} />}
+      <h2>Queue {upcoming.length > 0 && `· ${upcoming.length}`}</h2>
+      {pending.map((p, i) => (
+        <div key={`p${i}`} className="g-song pending">
+          <div className="g-main">
+            <div className="g-title">{p.title}</div>
+            <div className="g-sub">👤 {p.addedBy} · getting it ready…</div>
+          </div>
+        </div>
+      ))}
+      {upcoming.length === 0 && pending.length === 0 && (
+        <div className="g-note">Nothing queued yet — add a song!</div>
+      )}
+      {upcoming.map((t) => (
+        <Song key={t.id} t={t} onVote={onVote} />
+      ))}
+    </section>
+  );
+}
+
+function Song({ t, label, onVote }) {
+  return (
+    <div className={`g-song ${label ? "featured" : ""}`}>
+      <div className="g-main">
+        {label && <div className="g-label">{label}</div>}
+        <div className="g-title">{t.title}</div>
+        <div className="g-sub">
+          {[t.addedBy ? `👤 ${t.addedBy}` : "🎧 DJ", t.genre].filter(Boolean).join(" · ")}
+        </div>
+      </div>
+      {onVote && (
+        <div className="g-vote">
+          <button
+            className={t.myVote > 0 ? "on" : ""}
+            onClick={() => onVote(t, 1)}
+            aria-label={`Upvote ${t.title}`}
+          >
+            ▲
+          </button>
+          <span className="g-score">{t.score}</span>
+          <button
+            className={t.myVote < 0 ? "on down" : ""}
+            onClick={() => onVote(t, -1)}
+            aria-label={`Downvote ${t.title}`}
+          >
+            ▼
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
