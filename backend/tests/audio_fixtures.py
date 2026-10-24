@@ -46,3 +46,13 @@ def write_audio(path: str, y: np.ndarray) -> str:
         check=True,
     )
     return path
+
+
+def party_song() -> np.ndarray:
+    """120 s song shaped verse / big chorus (20-75 s) / verse / final chorus (90-120 s).
+    Played to the end it would mix out ~16 s before the end; party mode should leave
+    over the tail of the first chorus (~67 s)."""
+    y = progression("A minor", secs=120)
+    t = np.arange(len(y)) / SR
+    loud = ((t >= 20) & (t < 75)) | (t >= 90)
+    return y * np.where(loud, 1.0, 0.15)

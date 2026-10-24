@@ -280,9 +280,9 @@ function Playlist({ engine }) {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !adding && add()}
-          disabled={adding || running}
+          disabled={adding}
         />
-        <button className="ghost" onClick={add} disabled={adding || running || !url.trim()}>
+        <button className="ghost" onClick={add} disabled={adding || !url.trim()}>
           {adding ? <span className="spinner" /> : "+ Add"}
         </button>
       </div>
@@ -330,33 +330,72 @@ function Playlist({ engine }) {
         {tracks.length === 0 && (
           <div className="muted empty">Add tracks, then order them into a party set.</div>
         )}
-        {tracks.map((t, i) => (
-          <li key={t.id} className={running && auto.idx === i ? "current" : ""}>
-            <div className="t-row">
-              <span className="num">{i + 1}</span>
-              <div className="t-main">
-                <div className="t-title" title={t.title}>
-                  {t.title}
+        {tracks.map((t, i) => {
+          const isCurrent = running && auto.idx === i;
+          const isNext = running && !isCurrent && auto._nextIdx() === i;
+          const locked = engine.isLocked(t.id);
+          const played = running && !auto.loop && i < auto.idx;
+          return (
+            <li
+              key={t.id}
+              className={[isCurrent && "current", isNext && "next", played && "played"]
+                .filter(Boolean)
+                .join(" ")}
+            >
+              <div className="t-row">
+                <span className="num">{i + 1}</span>
+                <div className="t-main">
+                  <div className="t-title" title={t.title}>
+                    {t.title}
+                  </div>
+                  <div className="chips">
+                    <span className="chip bpm">{t.bpm ? Math.round(t.bpm) + " BPM" : "– BPM"}</span>
+                    <span className="chip key">
+                      {t.camelot || "?"}
+                      {t.key ? " · " + t.key : ""}
+                    </span>
+                    <span className="chip nrg">⚡{t.energy ?? "–"}</span>
+                    {t.genre && <span className="chip genre">{t.genre}</span>}
+                  </div>
                 </div>
-                <div className="chips">
-                  <span className="chip bpm">{t.bpm ? Math.round(t.bpm) + " BPM" : "– BPM"}</span>
-                  <span className="chip key">
-                    {t.camelot || "?"}
-                    {t.key ? " · " + t.key : ""}
-                  </span>
-                  <span className="chip nrg">⚡{t.energy ?? "–"}</span>
-                  {t.genre && <span className="chip genre">{t.genre}</span>}
+                {isCurrent && <span className="tag now">NOW</span>}
+                {isNext && <span className="tag">NEXT</span>}
+                <div className="t-actions">
+                  {running && !isCurrent && !isNext && !locked && (
+                    <button className="ghost sm" onClick={() => engine.playNext(t.id)} title="Play this next">
+                      ⏭ Next
+                    </button>
+                  )}
+                  <button
+                    className="x"
+                    onClick={() => engine.moveTrack(t.id, i - 1)}
+                    disabled={locked || i === 0}
+                    title="Move up"
+                  >
+                    ▲
+                  </button>
+                  <button
+                    className="x"
+                    onClick={() => engine.moveTrack(t.id, i + 1)}
+                    disabled={locked || i === tracks.length - 1}
+                    title="Move down"
+                  >
+                    ▼
+                  </button>
+                  <button
+                    className="x"
+                    onClick={() => engine.removeTrack(t.id)}
+                    disabled={locked}
+                    title="Remove"
+                  >
+                    ✕
+                  </button>
                 </div>
               </div>
-              {!running && (
-                <button className="x" onClick={() => engine.removeTrack(t.id)} title="remove">
-                  ✕
-                </button>
-              )}
-            </div>
-            {i < tracks.length - 1 && trans[i] && <TransitionBadge q={trans[i]} />}
-          </li>
-        ))}
+              {i < tracks.length - 1 && trans[i] && <TransitionBadge q={trans[i]} />}
+            </li>
+          );
+        })}
       </ol>
 
       <div className="pl-controls">
@@ -385,6 +424,28 @@ function Playlist({ engine }) {
           disabled={running || tracks.length < 3 || busy === "ai"}
         >
           {busy === "ai" ? <span className="spinner" /> : "✨ AI Polish"}
+        </button>
+        <button
+          className={`toggle ${engine.autoOrder ? "on" : ""}`}
+          onClick={() => {
+            engine.autoOrder = !engine.autoOrder;
+            engine.saveSession();
+            engine.emit();
+          }}
+          title="Slot each song you add into its best spot (key, tempo, energy). Off = add to the end."
+        >
+          🪄 Auto-order: {engine.autoOrder ? "ON" : "OFF"}
+        </button>
+        <button
+          className={`toggle ${auto.party ? "on" : ""}`}
+          onClick={() => {
+            auto.party = !auto.party;
+            engine.saveSession();
+            engine.emit();
+          }}
+          title="Mix out right after each song's big part (chorus / drop) instead of playing it to the end"
+        >
+          🔥 Party mode: {auto.party ? "ON" : "OFF"}
         </button>
         <button
           className={`toggle ${auto.loop ? "on" : ""}`}

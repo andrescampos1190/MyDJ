@@ -519,6 +519,37 @@ button:disabled {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
 }
+.tracks li.next {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+.tracks li.played {
+  opacity: 0.5;
+}
+.tag {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+.tag.now {
+  background: var(--accent);
+  color: #fff;
+}
+.t-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.x:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
 .t-row {
   display: flex;
   align-items: center;

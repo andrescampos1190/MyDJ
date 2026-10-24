@@ -76,6 +76,36 @@ export function relativeEnergies(tracks) {
   return out;
 }
 
+// How jarring it is to play b right after a: key clash + tempo jump + energy jump.
+function pairCost(a, b) {
+  return (
+    1.0 * (1 - camelotCompat(a.camelot, b.camelot)) +
+    1.2 * bpmDistance(a.bpm, b.bpm) +
+    0.6 * (Math.abs((a.energy ?? 5) - (b.energy ?? 5)) / 9)
+  );
+}
+
+// Where to slot a newly added track into an already-ordered list without moving
+// anything else: the position (lo..hi inclusive; p = "before list[p]", list.length =
+// "at the end") that adds the least transition cost.
+export function bestInsertIndex(list, track, lo = 0, hi = list.length) {
+  let best = hi;
+  let bestCost = Infinity;
+  for (let p = lo; p <= hi; p++) {
+    const prev = list[p - 1];
+    const next = list[p];
+    let cost = 0;
+    if (prev) cost += pairCost(prev, track);
+    if (next) cost += pairCost(track, next);
+    if (prev && next) cost -= pairCost(prev, next);
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = p;
+    }
+  }
+  return best;
+}
+
 // Greedy harmonic path from a low-energy opener, biased to follow a rising-then-
 // easing energy arc. Returns the reordered tracks + per-transition quality.
 export function orderForParty(tracks, opts = {}) {

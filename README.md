@@ -19,6 +19,14 @@ React + Web Audio API                         FastAPI                yt-dlp + ff
   energy arc (warm-up → peak → wind-down). Two ways:
   - **🎚 Order for Party** — built-in algorithm (instant, free, no API key).
   - **✨ AI Polish** — Claude sequences/explains it (needs `ANTHROPIC_API_KEY`).
+  - **🪄 Auto-order** (on by default, no key) — each song you add is slotted into its best
+    spot; songs already in the list never move, so your manual order is kept.
+- **Live queue**: add songs while a set is playing, **⏭ Next** to play one next, **▲▼** to
+  reorder, **✕** to drop one. The playing track (and, mid-blend, the incoming one) is locked.
+- **🔥 Party mode** (on by default): mixes out right after each song's big moment (chorus/drop)
+  instead of playing it to the end — no second verses or long outros; ~3.5 min max per song.
+- **Genre** from the source's metadata (site genre field, uploader tags, title) — free; AI
+  Polish can still label the rest.
 - **Mixes hands-free** with correct transitions: phrase/bar-aligned, **beat-matched**,
   **equal-power crossfade**, **3-band EQ bass-swap** (incoming enters with lows cut, bass
   swaps at the midpoint), and a deterministic clean handoff (never leaves a deck muted).
@@ -96,12 +104,16 @@ all of the above on every push, plus a Docker build check and the live tests.
 
 ## How to use
 1. Paste track URLs into the **Playlist** box → **+ Add** (each is downloaded + analyzed; you'll
-   see its BPM / Camelot key / energy chips).
-2. **🎚 Order for Party** (or **✨ AI Polish**) to sequence the set. The badges between tracks
-   show each transition's quality (perfect / good / ok / rough, with BPM%, key-match, energy step).
+   see its BPM / Camelot key / energy / genre chips). With **🪄 Auto-order** on, each lands in its
+   best spot automatically.
+2. Optionally **🎚 Order for Party** (full re-sequence with an energy arc) or **✨ AI Polish**. The
+   badges between tracks show each transition's quality (perfect / good / ok / rough, with BPM%,
+   key-match, energy step).
 3. Set the **Blend** length (toggle **🔁 Loop** if you want it to never end — it wraps back to the
    start) and hit **▶ Start Set**. It plays through, transitioning automatically; **⏹ Stop** ends it
    and silences both decks cleanly.
+4. During the set, keep adding songs; use **⏭ Next** / **▲▼** / **✕** to steer the queue. **NOW**
+   and **NEXT** tags show what's playing and what's mixing in next.
 
 ## How it works
 - **Analysis** (`backend/analyzer.py`): ffmpeg → PCM, an FFT chromagram + Krumhansl–Schmuckler
