@@ -45,10 +45,10 @@ def test_unreadable_file_never_raises(tmp_path):
 
 def test_big_parts_find_the_choruses(tmp_path):
     res = analyze(write_audio(str(tmp_path / "t.mp3"), party_song()))
-    (a0, a1), (b0, b1) = res["bigParts"]  # choruses at 20-75 s and 90-120 s
-    assert 18 <= a0 <= 26 and 69 <= a1 <= 77
-    assert 88 <= b0 <= 96 and b1 >= 116
-    assert len(res["loudness"]) == 120
+    (a0, a1), (b0, b1), (c0, c1) = res["bigParts"]  # choruses at 20-60, 90-130, 160-200 s
+    for (s, e), (ts, te) in zip(res["bigParts"], [(20, 60), (90, 130), (160, 200)]):
+        assert abs(s - ts) <= 2 and (abs(e - te) <= 2 or te == 200 and e >= 196)
+    assert len(res["loudness"]) == 200
 
 
 def test_lufs_tracks_level(tmp_path):

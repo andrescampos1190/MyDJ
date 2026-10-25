@@ -16,11 +16,15 @@
 //    vocal drops out on the bar line where the incoming one comes in (a vocal swap).
 
 import { bpmDistance, camelotCompat } from "./ordering";
-import { partyMixOut } from "./mixPoints";
+import {
+  PARTY_MAX_PLAY,
+  PARTY_MIN_PLAY,
+  PARTY_SHARE,
+  partyLeaveAt,
+  partyMixOut,
+} from "./mixPoints";
 
 const LEAD = 0.4; // s: schedule at least this far ahead on the audio clock
-const MIN_PLAY = 60; // party mode: leave after the first big part ending past this...
-const MAX_PLAY = 165; // ...and never later than this
 const MAX_GAP = 0.08; // tempo gap beyond which beat-matching sounds wrong (pitch / speed)
 const DOUBLE_GAP = 0.04; // double drops need near-identical tempos
 const FADE_SECS = 4;
@@ -31,12 +35,32 @@ const VOCAL_SHARE = 0.15; // vocals over this share of a song make it vocal-led
 // stand-in until a song's stems say where its vocals actually are — and genres built
 // for long DJ blends and double drops.
 const VOCAL_GENRES = new Set([
-  "Reggaeton", "Hip-Hop", "Pop", "Latin", "Bachata", "Salsa", "Cumbia", "Merengue",
-  "Corridos", "Dancehall", "Afrobeats", "K-Pop", "R&B", "Rock",
+  "Reggaeton",
+  "Hip-Hop",
+  "Pop",
+  "Latin",
+  "Bachata",
+  "Salsa",
+  "Cumbia",
+  "Merengue",
+  "Corridos",
+  "Dancehall",
+  "Afrobeats",
+  "K-Pop",
+  "R&B",
+  "Rock",
 ]);
 const ELECTRONIC = new Set([
-  "House", "Tech House", "Deep House", "Progressive House", "Afro House", "Techno",
-  "Trance", "EDM", "Drum & Bass", "Dubstep",
+  "House",
+  "Tech House",
+  "Deep House",
+  "Progressive House",
+  "Afro House",
+  "Techno",
+  "Trance",
+  "EDM",
+  "Drum & Bass",
+  "Dubstep",
 ]);
 
 function gridOf(t) {
@@ -45,7 +69,8 @@ function gridOf(t) {
   const beat = 60 / g.bpm;
   return { bpm: g.bpm, beat, bar: 4 * beat, down: g.downbeat };
 }
-const atOrAfter = (G, x) => G.down + Math.ceil((x - G.down - 1e-6) / G.bar) * G.bar;
+const atOrAfter = (G, x) =>
+  G.down + Math.ceil((x - G.down - 1e-6) / G.bar) * G.bar;
 const nearest = (G, x) => G.down + Math.round((x - G.down) / G.bar) * G.bar;
 const firstDownbeat = (G) => G.down - Math.floor(G.down / G.bar + 1e-9) * G.bar; // earliest >= 0
 
@@ -72,11 +97,10 @@ function outEnd({ out, G, pos, rate, span, party, now }) {
   if (now) return atOrAfter(G, earliest);
   let target;
   if (party) {
-    const part = (out.bigParts || []).find(([, end]) => end >= MIN_PLAY);
-    target = part ? part[1] : Math.max(MIN_PLAY, dur * 0.6);
-    target = Math.min(target, MAX_PLAY);
+    target = partyLeaveAt(out.bigParts, dur);
   } else {
-    const outro = out.outroStart > 0 && out.outroStart < dur ? out.outroStart : dur;
+    const outro =
+      out.outroStart > 0 && out.outroStart < dur ? out.outroStart : dur;
     target = Math.min(outro + span, dur);
   }
   let E = nearest(G, target);
@@ -99,7 +123,8 @@ function landing(inc, G, party) {
   if (start < d0 + G.bar - 1e-6) return null; // the song opens on it
   if (end - start > 0.6 * dur) return null; // one long section isn't a "drop"
   if (start > limit) return null;
-  if (start < d0 + 4 * G.bar - 1e-6 && quietIntroBars(inc, G, start) < 1) return null;
+  if (start < d0 + 4 * G.bar - 1e-6 && quietIntroBars(inc, G, start) < 1)
+    return null;
   return nearest(G, start);
 }
 
@@ -107,7 +132,8 @@ function landing(inc, G, party) {
 // otherwise unknown and the genre stands in.
 const knowsVocals = (t) => Array.isArray(t.vocals);
 const MIN_VOX = 0.3; // s: a vocal overlapping a stretch by less than this is just its edge
-const vocalsIn = (t, a, b) => (t.vocals || []).some(([s, e]) => Math.min(e, b) - Math.max(s, a) > MIN_VOX);
+const vocalsIn = (t, a, b) =>
+  (t.vocals || []).some(([s, e]) => Math.min(e, b) - Math.max(s, a) > MIN_VOX);
 function isVocal(t) {
   if (!knowsVocals(t)) return VOCAL_GENRES.has(t.genre);
   const secs = t.vocals.reduce((n, [s, e]) => n + (e - s), 0);
@@ -150,7 +176,15 @@ const base = { loop: null, keyShift: 0, echo: null, vocalSwap: null };
  *   keyShift = semitones to shift the incoming song; echo = {delayBeats, feedback};
  *   vocalSwap = the beat (from outStart) where the vocals hand over, or null.
  */
-export function planTransition({ out, inc, pos, rate = 1, blendSecs = 16, party = true, now = false }) {
+export function planTransition({
+  out,
+  inc,
+  pos,
+  rate = 1,
+  blendSecs = 16,
+  party = true,
+  now = false,
+}) {
   const Go = gridOf(out);
   const Gi = gridOf(inc);
 
@@ -159,8 +193,14 @@ export function planTransition({ out, inc, pos, rate = 1, blendSecs = 16, party 
     const secs = Math.min(FADE_SECS, blendSecs);
     let start;
     if (now) start = pos + LEAD * rate;
-    else if (party) start = partyMixOut(out.bigParts, out.duration, { blend: secs });
-    else start = Math.min(out.outroStart > 0 ? out.outroStart : out.duration, out.duration) - secs;
+    else if (party)
+      start = partyMixOut(out.bigParts, out.duration, { blend: secs });
+    else
+      start =
+        Math.min(
+          out.outroStart > 0 ? out.outroStart : out.duration,
+          out.duration,
+        ) - secs;
     start = Math.max(start ?? 0, pos + LEAD * rate);
     return {
       ...base,
@@ -215,7 +255,8 @@ export function planTransition({ out, inc, pos, rate = 1, blendSecs = 16, party 
   }
   const clash = compat < 0.4;
   const vocalPair = isVocal(out) && isVocal(inc);
-  const canSwap = !!(out.stems && inc.stems) && knowsVocals(out) && knowsVocals(inc);
+  const canSwap =
+    !!(out.stems && inc.stems) && knowsVocals(out) && knowsVocals(inc);
   // Bars the incoming song plays before its vocals come in (known from its stems), or,
   // until then, its quiet intro.
   const room = knowsVocals(inc)
@@ -246,23 +287,41 @@ export function planTransition({ out, inc, pos, rate = 1, blendSecs = 16, party 
   const incRate = (heard * 2 ** k) / Gi.bpm;
   const kk = 2 ** k; // incoming beats per outgoing beat
   const beatHeard = 60 / heard;
-  let beats = [32, 16, 8].find((n) => n * beatHeard <= Math.max(blendSecs, 8 * beatHeard));
+  let beats = [32, 16, 8].find(
+    (n) => n * beatHeard <= Math.max(blendSecs, 8 * beatHeard),
+  );
   if (clash) beats = Math.min(beats, 8); // keep a harmonic clash short
   if (vocalPair && !canSwap) beats = Math.min(beats, VOCAL_BLEND_BEATS);
 
   // Double drop: two electronic tracks, same key family and tempo — line both drops up,
   // swap the basslines right on the drop, then take the outgoing one away over 4 bars.
   if (
-    ELECTRONIC.has(out.genre) && ELECTRONIC.has(inc.genre) &&
-    compat >= 0.9 && gap <= DOUBLE_GAP && k === 0 && L != null && !now
+    ELECTRONIC.has(out.genre) &&
+    ELECTRONIC.has(inc.genre) &&
+    compat >= 0.9 &&
+    gap <= DOUBLE_GAP &&
+    k === 0 &&
+    L != null &&
+    !now
   ) {
     const run = Math.min(beats, 32);
     const inStart = L - run * Gi.beat;
     const lead = pos + LEAD * rate + run * Go.beat;
     const drop = (out.bigParts || [])
       .map(([s]) => nearest(Go, s))
-      .find((D) => D >= lead && (!party || (D + 16 * Go.beat >= MIN_PLAY && D <= MAX_PLAY)));
-    if (inStart >= d0 - 1e-6 && drop != null && drop + 16 * Go.beat <= out.duration - 0.25) {
+      .find(
+        (D) =>
+          D >= lead &&
+          (!party ||
+            (D + 16 * Go.beat >=
+              Math.max(PARTY_MIN_PLAY, PARTY_SHARE * out.duration) &&
+              D <= PARTY_MAX_PLAY)),
+      );
+    if (
+      inStart >= d0 - 1e-6 &&
+      drop != null &&
+      drop + 16 * Go.beat <= out.duration - 0.25
+    ) {
       const plan = {
         ...base,
         style: "double",
@@ -315,7 +374,12 @@ export function planTransition({ out, inc, pos, rate = 1, blendSecs = 16, party 
   // A filter sweep smooths a change of genre or energy, and hides a clash we can't fix.
   const genreChange = out.genre && inc.genre && out.genre !== inc.genre;
   const energyJump = Math.abs((out.energy ?? 5) - (inc.energy ?? 5)) >= 4;
-  const style = clash || genreChange || energyJump ? "filter" : beats <= 8 ? "short" : "blend";
+  const style =
+    clash || genreChange || energyJump
+      ? "filter"
+      : beats <= 8
+        ? "short"
+        : "blend";
 
   const span = beats * Go.beat; // outgoing track seconds covered by the blend
   const E = outEnd({ out, G: Go, pos, rate, span, party, now });
@@ -346,7 +410,8 @@ export function describePlan(p) {
   else if (p.style === "cut") s = "Cut on the one";
   else if (p.style === "double") s = "Double drop";
   else if (p.style === "filter") s = `${p.beats / 4}-bar filter sweep${drop}`;
-  else s = `${p.beats / 4}-bar ${p.style === "short" ? "quick blend" : "blend"}${drop}`;
+  else
+    s = `${p.beats / 4}-bar ${p.style === "short" ? "quick blend" : "blend"}${drop}`;
   if (p.loop) s += " (intro looped)";
   if (p.vocalSwap != null) s += " · vocal swap";
   if (p.keyShift) s += ` · key ${p.keyShift > 0 ? "+" : "−"}1`;

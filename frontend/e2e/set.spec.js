@@ -117,7 +117,7 @@ test("add a song mid-set and make it play next", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test("party mode mixes out after the big chorus, not at the end", async ({ page }) => {
+test("party mode mixes out after the chorus that ends past half-way, not at the end", async ({ page }) => {
   await page.goto("/");
   for (const name of ["G_major", "party_song"]) {
     await page.locator(".loadbar input").fill(`${MEDIA}/${name}.mp3`);
@@ -134,20 +134,20 @@ test("party mode mixes out after the big chorus, not at the end", async ({ page 
   await page.locator(".topbar").getByRole("button", { name: /Start set/ }).click();
   const status = page.locator(".set-status");
   await expect(status).toContainText("Live · song 1 of 2", { timeout: 30_000 });
-  // party_song: big chorus 20-75 s, final chorus 90-120 s. Jump near the first one's end.
-  await page.evaluate(() => window.engine.seek(window.engine.deckA.isPlaying ? "A" : "B", 50));
+  // party_song (200 s): choruses at 20-60, 90-130 and 160-200 s. Jump into the second.
+  await page.evaluate(() => window.engine.seek(window.engine.deckA.isPlaying ? "A" : "B", 105));
 
   await expect(status).toContainText("Mixing", { timeout: 30_000 });
   const pos = await page.evaluate(() => {
     const e = window.engine;
     return [e.deckA, e.deckB].find((d) => d.meta?.title === "party_song").position();
   });
-  // The transition finishes as the chorus ends at 75 s (on a downbeat), instead of
-  // mixing out at ~104 s by playing the song to its end.
-  expect(pos).toBeGreaterThan(50);
-  expect(pos).toBeLessThan(75);
+  // The transition finishes as the second chorus ends at 130 s (on a downbeat), instead
+  // of mixing out near the end by playing the song through.
+  expect(pos).toBeGreaterThan(105);
+  expect(pos).toBeLessThan(130);
   const outEnd = await page.evaluate(() => window.engine.auto._lastPlan.outEnd);
-  expect(Math.abs(outEnd - 75)).toBeLessThan(1);
+  expect(Math.abs(outEnd - 130)).toBeLessThan(1);
   await page.getByRole("button", { name: /Stop/ }).click();
 });
 
@@ -199,11 +199,11 @@ test("copy song data puts each track's analysis on the clipboard", async ({ page
   await expect(page.getByRole("button", { name: /Copied 1 song/ })).toBeVisible();
   const data = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
   expect(data).toHaveLength(1);
-  expect(data[0]).toMatchObject({ title: "party_song", camelot: "8A", duration: 120 });
+  expect(data[0]).toMatchObject({ title: "party_song", camelot: "8A", duration: 200 });
   expect(data[0].bigParts.length).toBeGreaterThan(0);
-  expect(data[0].loudness).toHaveLength(120);
-  expect(data[0].partyMixOut).toBeGreaterThan(55);
-  expect(data[0].partyMixOut).toBeLessThan(75);
+  expect(data[0].loudness).toHaveLength(200);
+  expect(data[0].partyMixOut).toBeGreaterThan(110); // over the end of the 90-130 s chorus
+  expect(data[0].partyMixOut).toBeLessThan(130);
   expect(typeof data[0].lufs).toBe("number");
 });
 

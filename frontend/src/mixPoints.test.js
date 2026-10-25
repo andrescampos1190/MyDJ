@@ -1,5 +1,50 @@
 import { describe, expect, it } from "vitest";
-import { matchGainDb, partyMixOut } from "./mixPoints";
+import { matchGainDb, partyLeaveAt, partyMixOut } from "./mixPoints";
+
+describe("partyLeaveAt", () => {
+  // Real song (Tito "El Bambino" - Chequea Cómo Se Siente, 3:28): its first chorus ends
+  // at 1:08 — leaving there cut it short; the one ending past half-way is at 2:39.
+  const chequea = [
+    [33.47, 68.14],
+    [78.8, 100.14],
+    [124.14, 158.8],
+    [169.47, 182.8],
+  ];
+
+  it("plays through the first big part that ends past half the song", () => {
+    expect(partyLeaveAt(chequea, 208)).toBe(158.8);
+  });
+
+  it("and past 1:30, on short songs", () => {
+    expect(
+      partyLeaveAt(
+        [
+          [40, 70],
+          [80, 100],
+          [110, 130],
+        ],
+        150,
+      ),
+    ).toBe(100);
+  });
+
+  it("never more than 3 minutes", () => {
+    expect(
+      partyLeaveAt(
+        [
+          [120, 150],
+          [200, 240],
+        ],
+        335,
+      ),
+    ).toBe(180);
+  });
+
+  it("~60% in without detected structure", () => {
+    expect(partyLeaveAt([], 200)).toBe(120);
+    expect(partyLeaveAt(null, 120)).toBe(90); // at least 1:30
+  });
+});
 
 describe("partyMixOut", () => {
   // 240 s pop song: chorus 1 at 60-90 s, chorus 2 at 135-165 s.
@@ -8,28 +53,21 @@ describe("partyMixOut", () => {
     [135, 165],
   ];
 
-  it("mixes out over the tail of the first big part that ends after minPlay", () => {
-    expect(partyMixOut(pop, 240, { blend: 16 })).toBe(82);
-  });
-
-  it("skips big parts that end too early", () => {
-    expect(partyMixOut([[20, 45], ...pop], 240, { blend: 16 })).toBe(82);
-    expect(partyMixOut(pop, 240, { blend: 16, minPlay: 120 })).toBe(157);
+  it("mixes out over the tail of the big part party mode leaves after", () => {
+    expect(partyMixOut(pop, 240, { blend: 16 })).toBe(157);
   });
 
   it("never starts the blend before the big part does", () => {
-    expect(partyMixOut([[58, 62]], 240, { blend: 16 })).toBe(58);
+    expect(partyMixOut([[118, 124]], 240, { blend: 16 })).toBe(118);
   });
 
   it("leaves ~60% in when there's no detected structure", () => {
     expect(partyMixOut([], 200, { blend: 16 })).toBe(120);
-    expect(partyMixOut(undefined, 80, { blend: 16 })).toBe(60); // at least minPlay...
-    expect(partyMixOut([], 50, { blend: 16 })).toBe(34); // ...but room for the blend
+    expect(partyMixOut(undefined, 100, { blend: 16 })).toBe(84); // room for the blend
   });
 
   it("caps play time and always leaves room for the blend", () => {
-    expect(partyMixOut([[150, 230]], 400, { blend: 16 })).toBe(165);
-    expect(partyMixOut([[160, 200]], 200, { blend: 16 })).toBe(165);
+    expect(partyMixOut([[150, 230]], 400, { blend: 16 })).toBe(180);
     expect(partyMixOut([[100, 120]], 120, { blend: 16 })).toBe(104);
   });
 
