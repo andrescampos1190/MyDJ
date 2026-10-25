@@ -185,13 +185,17 @@ cue points) folded away at the bottom for mixing by hand.
 
 ### Phones can't connect?
 The DJ's party panel shows a live checklist: whether the music server and the app answer on your
-network, and which phones are connected — once a phone shows up there, it's working. Phones show
-a status bar too (connected / lost connection / can't reach the music server). If a phone can't
-open the link or join:
+network, and which phones are connected — once a phone shows up there, it's working. Phones only
+talk to the app's port (5173): the app's server passes their requests on to the backend on this
+computer, so the backend itself never needs to be reachable from the network. Phones show a status
+bar too (connected / lost connection / the music server isn't running). If a phone can't open the
+link or join:
 - It must be on the **same Wi-Fi** as the computer — not mobile data, and not a "guest" Wi-Fi
   (those usually stop devices from seeing each other).
+- **"The DJ's music server isn't running"**: the phone reaches your computer fine, but the backend
+  window is closed or crashed — start MyDJ again with `.\start.ps1`.
 - **Windows Firewall:** Start → "Allow an app through Windows Firewall" → Change settings → tick
-  **Private** for **Node.js JavaScript Runtime** and **Python**.
+  **Private** for **Node.js JavaScript Runtime**.
 - Your Wi-Fi must be a **Private** network: Settings → Network & internet → Wi-Fi → your network →
   Network profile type → Private.
 - Turn off VPNs. If the panel lists more than one address, try the others (Windows can have

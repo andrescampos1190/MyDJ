@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Engine, API } from "./audioEngine";
+import { API_LABEL } from "./api";
 import { relativeEnergies } from "./ordering";
 import { PartyHost } from "./party";
 import QRCode from "qrcode";
@@ -475,7 +476,7 @@ function AddSong({ engine }) {
       if (!data.results?.length) setError("No results — try other words, or paste a link.");
     } catch (e2) {
       setError(
-        e2 instanceof TypeError ? `Can't reach the music server at ${API} — is it running?` : e2.message
+        e2 instanceof TypeError ? `Can't reach the music server at ${API_LABEL} — is it running?` : e2.message
       );
     } finally {
       setSearching(false);
@@ -631,7 +632,7 @@ function PartyCard({ party }) {
                   ? "Checking the music server is reachable on your network…"
                   : c.backend
                     ? "Music server reachable on your network"
-                    : "Music server only answers on this computer — close MyDJ and start it with .\\start.ps1"
+                    : "Music server not answering on your network — keep the backend window open (restart with .\\start.ps1)"
               }
             />
             <Status
