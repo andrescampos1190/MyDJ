@@ -2,7 +2,7 @@
 // pick up what they did — new song requests (already downloaded + analyzed by the
 // backend), votes, and who's connected. The DJ's browser stays in charge of playback.
 
-import { API } from "./api";
+import { API, API_LABEL } from "./api";
 
 const SYNC_MS = 1000;
 const CHECK_TIMEOUT_MS = 3000;
@@ -36,7 +36,7 @@ export class PartyHost {
       this.selected = 0;
       this.loaded = true;
     } catch {
-      this.error = `Can't reach the music server at ${API} — is the backend running?`;
+      this.error = `Can't reach the music server at ${API_LABEL} — is the backend running?`;
     }
     this._timer = setInterval(() => this.sync(), SYNC_MS);
     this.sync();
@@ -69,7 +69,7 @@ export class PartyHost {
   // the final proof — the panel shows that too.)
   async checkNetwork() {
     const ip = this.addresses[this.selected];
-    const api = new URL(API);
+    const api = new URL(API || window.location.origin);
     const onThisComputer =
       ["localhost", "127.0.0.1"].includes(api.hostname) || api.hostname === window.location.hostname;
     if (!ip || !onThisComputer) return; // e.g. a deployed backend: nothing local to check
@@ -82,11 +82,12 @@ export class PartyHost {
       }
     };
     const proto = window.location.protocol;
+    const appUrl = `${proto}//${ip}${window.location.port ? `:${window.location.port}` : ""}`;
     const [backend, app] = await Promise.all([
-      reach(`${proto}//${ip}:${api.port || 8000}/api/health`),
-      reach(`${proto}//${ip}${window.location.port ? `:${window.location.port}` : ""}/`, {
-        mode: "no-cors",
-      }),
+      // Phones reach the backend through the app's server (or directly, if VITE_API_URL
+      // points at it).
+      reach(API ? `${proto}//${ip}:${api.port || 8000}/api/health` : `${appUrl}/api/health`),
+      reach(`${appUrl}/`, { mode: "no-cors" }),
     ]);
     if (this.addresses[this.selected] === ip) this.check = { ip, backend, app };
     this.engine.emit();
@@ -128,7 +129,7 @@ export class PartyHost {
     } catch (e) {
       problem =
         e.name === "TimeoutError" || e instanceof TypeError
-          ? `Lost contact with the music server at ${API} — is the backend still running?`
+          ? `Lost contact with the music server at ${API_LABEL} — is the backend still running?`
           : e.message || "Party sync failed";
     } finally {
       this._busy = false;

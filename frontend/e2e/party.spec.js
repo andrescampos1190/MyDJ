@@ -141,14 +141,26 @@ test("phones get clear feedback when something's wrong", async ({ device }) => {
   await phone.unroute("**/api/party/queue?**");
   await expect(bar).toContainText("Connected to the DJ", { timeout: 10_000 });
 
-  // A phone that never reaches the music server (e.g. firewall on the DJ's computer).
+  // A phone that can't get through to the DJ's computer at all (e.g. a firewall).
   const blocked = await device();
   await blocked.route("**/api/party/**", (route) => route.abort());
   await join(blocked, "Cy");
-  await expect(blocked.locator(".g-conn")).toContainText("Can't reach the DJ's music server", {
+  await expect(blocked.locator(".g-conn")).toContainText("Can't reach the DJ's computer", {
     timeout: 15_000,
   });
   await expect(blocked.locator(".g-conn")).toContainText("Windows Firewall");
+
+  // The DJ's computer answers but its music server isn't running (what the app's server
+  // says when it can't pass a request on to the backend).
+  const stranded = await device();
+  await stranded.route("**/api/party/**", (route) =>
+    route.fulfill({ status: 502, json: { detail: "The music server isn't running", backendDown: true } })
+  );
+  await join(stranded, "Di");
+  await expect(stranded.locator(".g-conn")).toContainText("The DJ's music server isn't running", {
+    timeout: 15_000,
+  });
+  await expect(stranded.locator(".g-conn")).toContainText("start.ps1");
 
   // The DJ turns the party session off: phones are told (after the 10 s heartbeat timeout).
   await host.getByRole("region", { name: "Party session" }).getByRole("button", { name: "End" }).click();

@@ -52,12 +52,13 @@ export default defineConfig({
     {
       command: `npx vite --port ${WEB_PORT} --strictPort`,
       url: `http://localhost:${WEB_PORT}`,
-      env: { VITE_API_URL: `http://127.0.0.1:${API_PORT}` },
+      // Like `npm run dev` at home: the app's server passes /api through to the backend.
+      env: { MYDJ_BACKEND: `http://127.0.0.1:${API_PORT}` },
     },
     {
       command: `npx vite --port ${STEMS_WEB_PORT} --strictPort`,
       url: `http://localhost:${STEMS_WEB_PORT}`,
-      env: { VITE_API_URL: `http://127.0.0.1:${STEMS_API_PORT}` },
+      env: { MYDJ_BACKEND: `http://127.0.0.1:${STEMS_API_PORT}` },
     },
   ],
 });

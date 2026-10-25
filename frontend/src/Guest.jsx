@@ -35,17 +35,25 @@ function voterId() {
   return v;
 }
 
-// The request never reached the music server (vs. the server answering with an error).
-class Unreachable extends Error {}
+// The request never reached the music server (vs. the server answering with an error):
+// either this phone can't reach the DJ's computer ("network"), or it can but the music
+// server there isn't running ("backend" — the app's server says so).
+class Unreachable extends Error {
+  constructor(message, kind) {
+    super(message);
+    this.kind = kind;
+  }
+}
 
 async function api(path, { timeout = 8000, ...opts } = {}) {
   let res;
   try {
     res = await fetch(`${API}${path}`, { ...opts, signal: AbortSignal.timeout(timeout) });
   } catch {
-    throw new Unreachable("Can't reach the DJ's computer");
+    throw new Unreachable("Can't reach the DJ's computer", "network");
   }
   const data = await res.json().catch(() => ({}));
+  if (data.backendDown) throw new Unreachable("The DJ's music server isn't running", "backend");
   if (!res.ok) throw new Error(data.detail || `Something went wrong (${res.status})`);
   return data;
 }
@@ -96,7 +104,8 @@ function Join({ onJoin }) {
 
 function Party({ name, voter, onRename }) {
   const [queue, setQueue] = useState(null);
-  // connecting -> ok, or unreachable (never got through) / lost (got through before)
+  // connecting -> ok, or unreachable (never got through) / lost (got through before) /
+  // backend (the DJ's computer answers, its music server doesn't)
   const [conn, setConn] = useState("connecting");
   const [notice, setNotice] = useState("");
 
@@ -109,7 +118,9 @@ function Party({ name, voter, onRename }) {
       setQueue({ ...q, receivedAt: Date.now() });
       setConn("ok");
     } catch (e) {
-      if (e instanceof Unreachable) setConn((c) => (c === "ok" || c === "lost" ? "lost" : "unreachable"));
+      if (e instanceof Unreachable && e.kind === "backend") setConn("backend");
+      else if (e instanceof Unreachable)
+        setConn((c) => (c === "ok" || c === "lost" ? "lost" : "unreachable"));
       else setNotice(e.message);
     }
   }
@@ -162,13 +173,18 @@ function ConnectionBar({ conn, queue }) {
   let tone = "wait";
   let title = "Connecting to the DJ's computer…";
   let detail = "";
-  if (conn === "unreachable") {
+  if (conn === "backend") {
     tone = "bad";
-    title = "Can't reach the DJ's music server";
+    title = "The DJ's music server isn't running";
     detail =
-      "This page came from the DJ's computer, so your Wi-Fi is right. On the DJ's computer: " +
-      "allow Python through Windows Firewall (Private networks), or restart MyDJ with start.ps1. " +
-      "Retrying…";
+      "Your phone reaches the DJ's computer fine. On the DJ's computer: start MyDJ with " +
+      "start.ps1 and keep the backend window open. Retrying…";
+  } else if (conn === "unreachable") {
+    tone = "bad";
+    title = "Can't reach the DJ's computer";
+    detail =
+      "Make sure you're on the same Wi-Fi as the DJ (not mobile data). If you are: on the DJ's " +
+      "computer, allow Node.js through Windows Firewall (Private networks). Retrying…";
   } else if (conn === "lost") {
     tone = "bad";
     title = "Lost connection to the DJ — retrying…";
