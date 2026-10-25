@@ -28,6 +28,18 @@ describe("partyLeaveAt", () => {
     ).toBe(100);
   });
 
+  it("lets a chorus that ends just past 3 minutes finish", () => {
+    // Real song (Don Omar - Dutty Love, 4:46): its chorus ends at 3:01.
+    const dutty = [
+      [33.35, 51.35],
+      [67.35, 117.34],
+      [141.34, 181.34],
+      [205.34, 259.33],
+    ];
+    expect(partyLeaveAt(dutty, 286)).toBe(181.34);
+    expect(partyMixOut(dutty, 286, { blend: 16 })).toBeCloseTo(173.34, 6); // blend over its tail
+  });
+
   it("never more than 3 minutes", () => {
     expect(
       partyLeaveAt(

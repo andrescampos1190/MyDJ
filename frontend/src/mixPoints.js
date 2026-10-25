@@ -8,17 +8,27 @@
 export const PARTY_MIN_PLAY = 90;
 export const PARTY_SHARE = 0.5;
 export const PARTY_MAX_PLAY = 180;
+// ...except that a chorus running up to this much past MAX_PLAY gets to finish: cutting
+// it a bar or two short sounds worse than playing a few seconds more.
+const PARTY_GRACE = 10;
 
-// When party mode wants a song gone: the end of the big part described above (from the
-// backend's `bigParts` [[start, end], ...] seconds); with no detected structure, ~60% in.
+// The big part party mode leaves after (from the backend's `bigParts` [[start, end],
+// ...] seconds), or undefined.
+function leavePart(bigParts, dur, minPlay) {
+  const from = Math.max(minPlay, PARTY_SHARE * dur);
+  return (bigParts || []).find(([, end]) => end >= from);
+}
+
+// When party mode wants a song gone: the end of that big part; with no detected
+// structure, ~60% in.
 export function partyLeaveAt(
   bigParts,
   dur,
   { minPlay = PARTY_MIN_PLAY, maxPlay = PARTY_MAX_PLAY } = {},
 ) {
-  const from = Math.max(minPlay, PARTY_SHARE * dur);
-  const part = (bigParts || []).find(([, end]) => end >= from);
-  return Math.min(part ? part[1] : Math.max(minPlay, dur * 0.6), maxPlay);
+  const part = leavePart(bigParts, dur, minPlay);
+  if (!part) return Math.min(Math.max(minPlay, dur * 0.6), maxPlay);
+  return part[1] <= maxPlay + PARTY_GRACE ? part[1] : maxPlay;
 }
 
 // "Party" mix-out: start blending over the tail of that big part, instead of playing
@@ -32,10 +42,11 @@ export function partyMixOut(
   if (!(dur > 0)) return null;
   const latest = Math.max(1, Math.min(maxPlay, dur - blend));
   const end = partyLeaveAt(bigParts, dur, { minPlay, maxPlay });
-  const part = (bigParts || []).find(([, e]) => e === end);
+  const part = leavePart(bigParts, dur, minPlay);
   // Start blending before the big part ends, so the next track's energy takes over as
   // it finishes rather than after the floor has already dropped.
-  if (part) return Math.min(Math.max(part[0], end - blend / 2), latest);
+  if (part && part[1] === end)
+    return Math.min(Math.max(part[0], end - blend / 2), latest);
   return Math.min(end, latest);
 }
 
